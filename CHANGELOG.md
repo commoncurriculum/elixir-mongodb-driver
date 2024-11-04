@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0](https://github.com/commoncurriculum/elixir-mongodb-driver/compare/v1.5.0...v1.4.0) (2024-11-04)
+
+
+### Features
+
+* Add github action ([25753fb](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/25753fb4870d9f0f9027bb329a1a8ef1bcf95dcc))
+* Add github action ([6426b84](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/6426b8463827251dbfd3d1f76f266da4e9c38dfa))
+* add support for Elixir 1.15 ([#195](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/195)) ([f621a62](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/f621a62d5bb825cfd77e8f3024d569f23be0376d))
+* added support for op_compressed (zlib and zstd) ([cf32c87](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/cf32c8739ef88175a0c914bd2ef96419f13d992f))
+* Exclude rs_required test units ([25145dd](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/25145dde14a130f7dbd26829e916d3a6b8004f8a))
+* Exclude rs_required test units ([1e0f2fd](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/1e0f2fdaf14d926b230f1fa347b74e519880414a))
+* Exclude rs_required test units ([23a5677](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/23a56772a3ee4e2768a61cc9940072722a821164))
+* Supports passing arrayFilters option through find_one_and_update ([#201](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/201)) ([082878b](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/082878b121ac02fc763cf5be0b6b197abbcbbe9e))
+* Use .tool-versions ([ca6b872](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/ca6b8726aaa7c6d2a87451f07ae1a8978018701b))
+* Use .tool-versions ([09a3e7f](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/09a3e7fa03734a4fdd008c6853508cc2e2403fae))
+* Use all test units ([4fd9d22](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/4fd9d221bb7e86236502192b8b4efa3cd59fec92))
+* Use all test units ([6130a02](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/6130a02c767885e3036645ace3dc2888f1da2a3e))
+* Use credo ([fd172f3](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/fd172f320f9b4af17e4450d5f26bd0422b7bf4b7))
+* Use credo ([8f4b03a](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/8f4b03a898df84c5089992ad365a423d628a3e6f))
+* Use github actions ([db02140](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/db02140e30e0a9517292953ee68af1f6f70730c2))
+* Use github actions ([90f9ab8](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/90f9ab828cf4fd62ca405beea80ba3f36d715d3e))
+* Use github actions ([9510055](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/951005598b42a99ac98934f2094d003ba766244b))
+
+
+### Bug Fixes
+
+* add migration ([da65de4](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/da65de4d8fd7cf6a15ac0c42b3022ca1fe743876))
+* add support for the hint option ([#175](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/175)) ([4c817b7](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/4c817b721eb5430dc20eaae754a24d671cb52a62))
+* add telemetry start event to fix [#174](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/174) ([e79db9e](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/e79db9e0faedf3b37dcaf8fab6a9aa98dba3b43b))
+* added support for read preference specified by the URL ([#207](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/207)) ([9e4d569](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/9e4d56957a8bd2605bf50dbe5eea551b4fc2dc40))
+* applies the global timeout value to each query ([#215](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/215)) ([64f8ea1](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/64f8ea16ed47fb724e5fca6d70ef99f3ecef0f51))
+* check if monitor pid exists before stopping ([6e0c8b2](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/6e0c8b2625d0c424d194a0efcd799177a4c916f1))
+* deprecated 'use Bitwise' ([#168](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/168)) ([a980d57](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/a980d5782a56a0a8168c5229fe22b7a935c433b3))
+* Fix credo warnings ([4fa2b48](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/4fa2b48fbd87ff0e6f771d08defe9d4238ce6256))
+* fixed typo ([e6eff31](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/e6eff31fd1c001074f73aab18d8d88a1cd33005c))
+* handle read preferences without tags ([50ea98d](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/50ea98db82217bbd9a2f37ad57f6f271b2bff7c2))
+* improve the dump and load functions ([#154](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/154)) ([e7f2d44](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/e7f2d44a01fa25cd85cb8fd1f935ba5a201fe011))
+* improved the reconnection workflow ([08d7fbc](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/08d7fbc05bff833de177ae168ca3bb7fa4425572))
+* preserve the order of the keys ([#211](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/211)) ([b360d87](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/b360d87ad02383e37ad53dafa036abfb9e2bbc53))
+* remove a bug in the hello handshake protocol (thanks to fireproofsocks for reporting) ([59aa841](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/59aa841cc619f77979cc3027c76e918373685723))
+* Remove compiler warning ([1ef27ba](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/1ef27ba6ae69e1077de8b4cde1e8f1bd64763e95))
+* remove derived attributes in the dump function ([c1b60b4](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/c1b60b413329f32d4e0bd52c3988b89b19fe7f5a))
+* replace :code.priv_dir/1 function ([da0fd6c](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/da0fd6cdc777c4d1cb1df0abac98af1f4a37ad11))
+* **update/4:** improve Mongo.update/4 function ([#245](https://github.com/commoncurriculum/elixir-mongodb-driver/issues/245)) ([50b511d](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/50b511d01b7ecd3350a3b21110d15fa0fbbb6fb6))
+* use the basename of the file path ([3a10c56](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/3a10c5604a2cbc5d284a17578280e96c93f61e63))
+* use the same timestamps in new/0 function ([0db61da](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/0db61dac03eb2a27d4d47576ed402ad1e6c452f4))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([64e274a](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/64e274a761dd9e6757d1b506ee3ba4308ac1448f))
+* release 1.2.1 ([0ef1482](https://github.com/commoncurriculum/elixir-mongodb-driver/commit/0ef14829361bde236cfc054d774a3a51d0abea29))
+
 ## [1.5.0](https://github.com/zookzook/elixir-mongodb-driver/compare/v1.4.1...v1.5.0) (2024-09-20)
 
 
