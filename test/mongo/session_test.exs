@@ -474,4 +474,40 @@ defmodule Mongo.SessionTest do
     assert %{:inserted_count => 3, :matched_count => 6, :deleted_count => 3} == Map.take(result, [:inserted_count, :matched_count, :deleted_count])
     assert {:ok, 0} == Mongo.count(top, coll, %{})
   end
+
+  @tag :mongo_3_6
+  test "bind_session returns the same command and opts as binding the full command", _ do
+    raw_bind = fn pid, cmd, opts ->
+      send(pid, {:call, self(), {:bind_session, cmd, opts}})
+
+      receive do
+        {:session_result, result} -> result
+      end
+    end
+
+    new_session = fn wire_version, session_opts, state ->
+      server_session = %Mongo.Session.ServerSession{session_id: :id, txn_num: 3, last_use: 0}
+      pid = spawn(Session, :init, [:topology, :conn, :address, server_session, wire_version, session_opts])
+
+      if session_opts[:causal_consistency], do: Session.advance_operation_time(pid, %BSON.Timestamp{value: 5, ordinal: 1})
+      if state in [:starting, :in_progress], do: :ok = Session.start_transaction(pid)
+      if state == :in_progress, do: raw_bind.(pid, [ping: 1], [])
+      pid
+    end
+
+    cmds = [
+      [insert: "coll", documents: [%{a: 1}], ordered: nil, writeConcern: %{w: 1}, comment: {:x, 1}],
+      [find: "coll", filter: %{x: nil}, readConcern: %{level: :local}, readConcern: nil, lsid: :old],
+      [find: "coll", readConcern: [level: :majority], txnNumber: 9, autocommit: true, "$readPreference": %{mode: :x}],
+      [update: "coll", updates: [%{q: %{}, u: %{}}], writeConcern: %{w: 1}, writeConcern: %{w: 2}, x: false],
+      []
+    ]
+
+    session_opts = [[], [retryable_writes: true], [causal_consistency: true, read_preference: %{mode: :secondary}]]
+
+    for wire_version <- [5, 17], s_opts <- session_opts, state <- [:none, :starting, :in_progress], cmd <- cmds do
+      expected = raw_bind.(new_session.(wire_version, s_opts, state), cmd, timeout: 1)
+      assert expected == Session.bind_session(new_session.(wire_version, s_opts, state), cmd, timeout: 1)
+    end
+  end
 end
