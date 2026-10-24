@@ -1645,11 +1645,28 @@ defmodule Mongo do
   @spec exec_command_session(GenServer.server(), BSON.document(), Keyword.t()) ::
           {:ok, BSON.document() | nil} | {:error, Mongo.Error.t()}
   def exec_command_session(session, cmd, opts) do
+    with {:ok, doc, _duration} <- run_command_session(session, cmd, opts) do
+      {:ok, doc}
+    end
+  end
+
+  @doc false
+  # Used by Mongo.Stream. Runs a getMore and returns its batch undecoded (BSON.LazyDocuments)
+  # unless someone is subscribed to command events. The log and the telemetry event of such a
+  # getMore are left to the caller (see log_command/3), so that their duration can still
+  # include decoding the batch.
+  @spec exec_get_more(GenServer.server(), BSON.document(), Keyword.t()) ::
+          {:ok, BSON.document(), non_neg_integer} | {:error, Mongo.Error.t()}
+  def exec_get_more(session, cmd, opts) do
+    run_command_session(session, cmd, Keyword.put(opts, :lazy_cursor, true))
+  end
+
+  defp run_command_session(session, cmd, opts) do
     with {:ok, conn, new_cmd, opts} <- Session.bind_session(session, cmd, opts),
-         {:ok, _cmd, response} <- execute(conn, %Query{action: {:command, new_cmd}}, opts),
+         {:ok, _cmd, {_doc, _event, _flags, duration} = response} <- execute(conn, %Query{action: {:command, new_cmd}}, opts),
          :ok <- Session.update_session(session, response, opts),
          {:ok, {_flags, doc}} <- check_for_error(response, cmd, opts) do
-      {:ok, doc}
+      {:ok, doc, duration}
     else
       {:error, error} ->
         {:error, error}
@@ -1814,7 +1831,7 @@ defmodule Mongo do
       :commands
     )
 
-    do_log(cmd, duration, opts)
+    log_success(response, cmd, duration, opts)
 
     {:ok, {flags, response}}
   end
@@ -1829,7 +1846,7 @@ defmodule Mongo do
       :commands
     )
 
-    do_log(cmd, duration, opts)
+    log_success(response, cmd, duration, opts)
 
     {:ok, {flags, response}}
   end
@@ -1912,6 +1929,14 @@ defmodule Mongo do
 
   defp assert_many_docs!(other),
     do: raise(ArgumentError, "expected list of documents, got: #{inspect(other)}")
+
+  # A getMore batch that is still undecoded is logged by Mongo.Stream once it has been decoded.
+  defp log_success(%{"cursor" => %{"nextBatch" => %BSON.LazyDocuments{}}}, _cmd, _duration, _opts), do: :ok
+  defp log_success(_response, cmd, duration, opts), do: do_log(cmd, duration, opts)
+
+  @doc false
+  # Logs a command and emits its telemetry event, see exec_get_more/3.
+  def log_command(cmd, duration, opts), do: do_log(cmd, duration, opts)
 
   ## support for logging like Ecto
   defp do_log(:more_to_come, _duration, _opts) do

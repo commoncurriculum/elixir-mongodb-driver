@@ -103,11 +103,76 @@ defmodule Mongo.StreamTest do
     def document(_binary), do: raise(ArgumentError, "bad document")
   end
 
-  test "a batch that fails to decode raises the decoder's error and closes the cursor", %{pid: top, coll: coll, catcher: catcher} do
-    stream = Mongo.find(top, coll, %{}, batch_size: 10)
-    stream = %{stream | docs: %BSON.LazyDocuments{binary: <<0x03, "0", 0, 5, 0, 0, 0, 0>>, decoder: FailingDecoder}}
+  defmodule SlowDecoder do
+    def document(binary) do
+      Process.sleep(2)
+      BSON.Decoder.document(binary)
+    end
+  end
 
-    assert_raise ArgumentError, "bad document", fn -> Enum.to_list(stream) end
+  # A stream whose next batch is the given documents, undecoded, as if a getMore had returned them.
+  defp with_lazy_batch(stream, decoder, docs) do
+    binary = docs |> Enum.with_index() |> Enum.map(fn {doc, i} -> [0x03, Integer.to_string(i), 0, BSON.Encoder.document(doc)] end) |> IO.iodata_to_binary()
+    get_more = [getMore: %BSON.LongNumber{value: stream.cursor}, collection: stream.coll |> String.split(".") |> List.last()]
+    %{stream | docs: %BSON.LazyDocuments{binary: binary, decoder: decoder}, batch_log: {get_more, 0}}
+  end
+
+  def forward_execution(_event, %{duration: duration}, %{command: command}, parent), do: send(parent, {:executed, command, duration})
+
+  defp attach_telemetry(test) do
+    :telemetry.attach("#{inspect(test)}", [:mongodb_driver, :execution], &__MODULE__.forward_execution/4, self())
+    on_exit(fn -> :telemetry.detach("#{inspect(test)}") end)
+  end
+
+  defp executed() do
+    receive do
+      {:executed, command, _duration} -> [command | executed()]
+    after
+      0 -> []
+    end
+  end
+
+  test "a batch that fails to decode fails like a getMore whose reply cannot be decoded", %{pid: top, coll: coll, catcher: catcher, test: test} do
+    attach_telemetry(test)
+    stream = top |> Mongo.find(coll, %{}, batch_size: 10) |> with_lazy_batch(FailingDecoder, [%{a: 1}])
+
+    # Mongo.Stream raises the {:error, error} that the getMore returns.
+    error = assert_raise ArgumentError, fn -> Enum.to_list(stream) end
+    assert error.message =~ ~s(got: {:error, %ArgumentError{message: "bad document"}})
     assert catcher |> EventCatcher.succeeded_events() |> Enum.any?(&(&1.command_name == :killCursors))
+
+    # As before, a getMore that fails to decode is not logged.
+    refute_received {:executed, :getMore, _duration}
+  end
+
+  test "without command event subscribers, getMores are logged once their batch is decoded", %{pid: top, coll: coll, catcher: catcher, test: test} do
+    without_command_subscribers(catcher)
+    attach_telemetry(test)
+
+    assert 1_000 == top |> Mongo.find(coll, %{}, batch_size: 300) |> Enum.count()
+    assert_received {:executed, :find, _duration}
+    for _ <- 1..3, do: assert_received({:executed, :getMore, _duration})
+    refute_received {:executed, :getMore, _duration}
+  end
+
+  test "the logged duration of a getMore includes decoding its batch", %{pid: top, coll: coll, test: test} do
+    attach_telemetry(test)
+    docs = Enum.map(1..10, &%{index: &1})
+
+    # With a limit, the cursor is closed after the first batch, which is replaced by a lazy one.
+    assert 10 == top |> Mongo.find(coll, %{}, limit: 10, batch_size: 10) |> with_lazy_batch(SlowDecoder, docs) |> Enum.count()
+    assert_received {:executed, :getMore, duration}
+    assert duration >= 10 * 2_000
+
+    # A getMore whose batch was only partly read is logged when the stream halts.
+    docs = Enum.map(1..150, &%{index: &1})
+    assert [1] == top |> Mongo.find(coll, %{}, limit: 10, batch_size: 10) |> with_lazy_batch(SlowDecoder, docs) |> Stream.map(& &1["index"]) |> Enum.take(1)
+    assert_received {:executed, :getMore, duration}
+    assert duration >= 100 * 2_000
+
+    # And before its cursor is killed, if it is still open.
+    _ = executed()
+    assert [1] == top |> Mongo.find(coll, %{}, batch_size: 10) |> with_lazy_batch(SlowDecoder, docs) |> Stream.map(& &1["index"]) |> Enum.take(1)
+    assert [:find, :getMore, :killCursors] == executed()
   end
 end
