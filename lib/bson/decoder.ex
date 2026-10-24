@@ -8,6 +8,8 @@ defmodule BSON.DecoderGenerator do
 
       require Logger
 
+      @behaviour BSON.LazyDocuments
+
       @preserve_order opts[:preserve_order] || false
       @compile {:inline, cstring: 1, framed: 1, copy_key: 2}
       @max_unix_time ~U[9999-12-31 23:59:59.999Z]
@@ -33,6 +35,7 @@ defmodule BSON.DecoderGenerator do
         documents(rest, [doc | acc])
       end
 
+      @impl BSON.LazyDocuments
       def document(binary) do
         {doc, rest} = framed(binary)
         {doc_fields(doc, []), rest}
@@ -65,6 +68,50 @@ defmodule BSON.DecoderGenerator do
           acc
           |> Map.new()
           |> Map.put(@preserve_order, Enum.map(acc, fn {key, _value} -> key end) |> Enum.reverse())
+        end
+      end
+
+      @doc """
+      Decodes a command reply like `document/1`, but leaves the documents of a cursor
+      batch (`cursor.firstBatch` or `cursor.nextBatch`) undecoded in a
+      `BSON.LazyDocuments`, to be decoded by `decoder` (see `BSON.LazyDocuments`).
+      """
+      # Decoding a large batch up front keeps every document alive on the heap at once,
+      # and the garbage collector then spends most of the time copying them. A stream
+      # decodes them a few at a time instead.
+      @impl BSON.LazyDocuments
+      def lazy_cursor_document(binary, decoder \\ __MODULE__) do
+        reply_document(binary, :reply, decoder)
+      end
+
+      defp reply_document(binary, level, decoder) do
+        {doc, rest} = framed(binary)
+        {reply_fields(doc, [], level, decoder), rest}
+      end
+
+      defp reply_fields(<<type, rest::binary>>, acc, level, decoder) do
+        {key, rest} = cstring(rest)
+
+        {value, rest} =
+          case {level, type, key} do
+            {:reply, @type_document, "cursor"} -> reply_document(rest, :cursor, decoder)
+            {:cursor, @type_array, batch} when batch in ["firstBatch", "nextBatch"] -> lazy_list(rest, decoder)
+            _other -> type(type, rest)
+          end
+
+        reply_fields(rest, [{key, value} | acc], level, decoder)
+      end
+
+      defp reply_fields("", acc, _level, _decoder) do
+        to_map(acc)
+      end
+
+      defp lazy_list(binary, decoder) do
+        {list, rest} = framed(binary)
+
+        case list do
+          "" -> {[], rest}
+          list -> {%BSON.LazyDocuments{binary: list, decoder: decoder}, rest}
         end
       end
 

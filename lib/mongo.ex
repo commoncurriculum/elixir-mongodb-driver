@@ -434,6 +434,9 @@ defmodule Mongo do
 
   For all options see [Options](https://docs.mongodb.com/manual/reference/command/aggregate/#aggregate)
 
+  While the cursor is consumed, the next batch is requested in the background (see `Mongo.Stream`).
+  Pass `prefetch: false` to turn that off.
+
   """
   @spec aggregate(GenServer.server(), collection, [BSON.document()], Keyword.t()) :: cursor
   def aggregate(topology_pid, coll, pipeline, opts \\ []) do
@@ -457,9 +460,16 @@ defmodule Mongo do
       opts
       |> Keyword.drop(~w(explain allow_disk_use collation bypass_document_validation hint comment read_concern)a)
       |> Keyword.put_new(:compression, true)
+      |> no_prefetch_for_change_stream(pipeline)
 
     get_stream(topology_pid, cmd, opts)
   end
+
+  # A change stream getMore waits for new data, so it is not requested ahead (see Mongo.Stream).
+  defp no_prefetch_for_change_stream(opts, [%{"$changeStream" => _} | _]), do: Keyword.put(opts, :prefetch, false)
+  defp no_prefetch_for_change_stream(opts, [%{"$changeStream": _} | _]), do: Keyword.put(opts, :prefetch, false)
+  defp no_prefetch_for_change_stream(opts, [[{key, _} | _] | _]) when key in [:"$changeStream", "$changeStream"], do: Keyword.put(opts, :prefetch, false)
+  defp no_prefetch_for_change_stream(opts, _pipeline), do: opts
 
   @doc """
   Finds a document and updates it (using atomic modifiers).
@@ -762,6 +772,9 @@ defmodule Mongo do
   Use the underscore style, for example to set the option `singleBatch` use `single_batch`. Another example:
 
        Mongo.find(top, "jobs", %{}, batch_size: 2)
+
+  While the cursor is consumed, the next batch is requested in the background (see `Mongo.Stream`).
+  Pass `prefetch: false` to turn that off.
 
   """
   @spec find(GenServer.server(), collection, BSON.document(), Keyword.t()) ::
@@ -1430,6 +1443,8 @@ defmodule Mongo do
 
   @doc """
   Returns a cursor to enumerate all indexes
+
+  Like `find/4`, it accepts `prefetch: false`.
   """
   @spec list_indexes(GenServer.server(), String.t(), Keyword.t()) :: cursor
   def list_indexes(topology_pid, coll, opts \\ []) do
@@ -1646,7 +1661,7 @@ defmodule Mongo do
           {:ok, BSON.document() | nil} | {:error, Mongo.Error.t()}
   def exec_command_session(session, cmd, opts) do
     with {:ok, conn, new_cmd, opts} <- Session.bind_session(session, cmd, opts),
-         {:ok, _cmd, response} <- DBConnection.execute(conn, %Query{action: {:command, new_cmd}}, [], opts),
+         {:ok, response} <- execute_command(conn, new_cmd, opts),
          :ok <- Session.update_session(session, response, opts),
          {:ok, {_flags, doc}} <- check_for_error(response, cmd, opts) do
       {:ok, doc}
@@ -1660,8 +1675,20 @@ defmodule Mongo do
   @spec exec_command(GenServer.server(), BSON.document(), Keyword.t()) ::
           {:ok, {any(), BSON.document()} | nil} | {:error, Mongo.Error.t()}
   def exec_command(conn, cmd, opts) do
-    with {:ok, _cmd, response} <- DBConnection.execute(conn, %Query{action: {:command, cmd}}, [], opts) do
+    with {:ok, response} <- execute_command(conn, cmd, opts) do
       check_for_error(response, cmd, opts)
+    end
+  end
+
+  # Cursor batches arrive undecoded (BSON.LazyDocuments, see Mongo.Messages). They are decoded
+  # here, before command events are sent, unless the caller decodes them itself (Mongo.Stream,
+  # with `lazy_cursor: true`).
+  defp execute_command(conn, cmd, opts) do
+    with {:ok, _cmd, {doc, event, flags, duration}} <- DBConnection.execute(conn, %Query{action: {:command, cmd}}, [], opts) do
+      case opts[:lazy_cursor] do
+        true -> {:ok, {doc, event, flags, duration}}
+        _eager -> {:ok, {BSON.LazyDocuments.materialize(doc), event, flags, duration}}
+      end
     end
   end
 
@@ -1775,12 +1802,24 @@ defmodule Mongo do
   end
 
   ##
+  # Replies to Mongo.Stream's getMores keep their cursor batch undecoded (BSON.LazyDocuments).
+  # Subscribers get the decoded documents, as before; they are only decoded when someone
+  # is subscribed to command events.
+  ##
+  defp event_reply(reply, opts) do
+    case opts[:lazy_cursor] == true and Registry.lookup(:events_registry, :commands) != [] do
+      true -> BSON.LazyDocuments.materialize(reply)
+      false -> reply
+    end
+  end
+
+  ##
   # Checks for an error and broadcast the event.
   ##
   defp check_for_error({%{"ok" => ok} = response, %{request_id: request_id, operation_id: operation_id, connection_id: connection_id} = event, flags, duration}, cmd, opts) when ok == 1 do
     Events.notify(
       %CommandSucceededEvent{
-        reply: response,
+        reply: event_reply(response, opts),
         duration: duration,
         command_name: event.command_name,
         request_id: request_id,
@@ -1798,7 +1837,7 @@ defmodule Mongo do
   defp check_for_error({%{"ok" => ok} = response, event, flags, duration}, cmd, opts) when ok == 1 do
     Events.notify(
       %CommandSucceededEvent{
-        reply: response,
+        reply: event_reply(response, opts),
         duration: duration,
         command_name: event.command_name
       },
