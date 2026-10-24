@@ -9,7 +9,7 @@ defmodule BSON.DecoderGenerator do
       require Logger
 
       @preserve_order opts[:preserve_order] || false
-      @compile {:inline, cstring: 1}
+      @compile {:inline, cstring: 1, framed: 1, copy_key: 2}
       @max_unix_time ~U[9999-12-31 23:59:59.999Z]
       @min_unix_time ~U[-9999-01-01 00:00:00.000Z]
       @unix_start DateTime.to_unix(@min_unix_time, :millisecond)
@@ -33,11 +33,16 @@ defmodule BSON.DecoderGenerator do
         documents(rest, [doc | acc])
       end
 
-      def document(<<size::int32(), rest::binary>>) do
-        size = size - 5
-        <<doc::binary(size), 0x00, rest::binary>> = rest
-
+      def document(binary) do
+        {doc, rest} = framed(binary)
         {doc_fields(doc, []), rest}
+      end
+
+      # Splits a length-prefixed, null-terminated document or array into its body and the rest.
+      defp framed(<<size::int32(), rest::binary>>) do
+        size = size - 5
+        <<body::binary(size), 0x00, rest::binary>> = rest
+        {body, rest}
       end
 
       defp doc_fields(<<type, rest::binary>>, acc) do
@@ -47,27 +52,29 @@ defmodule BSON.DecoderGenerator do
         doc_fields(rest, [{key, value} | acc])
       end
 
+      defp doc_fields("", acc) do
+        to_map(acc)
+      end
+
       if @preserve_order == false do
-        defp doc_fields("", acc) do
+        defp to_map(acc) do
           Map.new(acc)
         end
       else
-        defp doc_fields("", acc) do
+        defp to_map(acc) do
           acc
           |> Map.new()
           |> Map.put(@preserve_order, Enum.map(acc, fn {key, _value} -> key end) |> Enum.reverse())
         end
       end
 
-      defp list(<<size::int32(), rest::binary>>) do
-        size = size - 5
-        <<list::binary(size), 0x00, rest::binary>> = rest
-
+      defp list(binary) do
+        {list, rest} = framed(binary)
         {list_elems(list, []), rest}
       end
 
       defp list_elems(<<type, rest::binary>>, acc) do
-        {_ignored, rest} = cstring(rest)
+        rest = skip_cstring(rest)
         {value, rest} = type(type, rest)
 
         list_elems(rest, [value | acc])
@@ -77,17 +84,22 @@ defmodule BSON.DecoderGenerator do
         Enum.reverse(acc)
       end
 
-      defp cstring(binary) do
-        split(binary, [])
+      # Scans for the terminating null byte without building a list per key. A key of up to
+      # 64 bytes is already copied by binary_part/3; a longer one would be a sub-binary that
+      # keeps the (possibly huge) reply binary alive, so it is copied explicitly.
+      defp cstring(binary), do: cstring(binary, binary, 0)
+
+      defp cstring(<<0x00, rest::binary>>, orig, len) do
+        {copy_key(binary_part(orig, 0, len), len), rest}
       end
 
-      defp split(<<0x00, rest::binary>>, acc) do
-        {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
-      end
+      defp cstring(<<_, rest::binary>>, orig, len), do: cstring(rest, orig, len + 1)
 
-      defp split(<<byte, rest::binary>>, acc) do
-        split(rest, [byte | acc])
-      end
+      defp copy_key(key, len) when len > 64, do: :binary.copy(key)
+      defp copy_key(key, _len), do: key
+
+      defp skip_cstring(<<0x00, rest::binary>>), do: rest
+      defp skip_cstring(<<_, rest::binary>>), do: skip_cstring(rest)
 
       defp subtype(0x00), do: :generic
       defp subtype(0x01), do: :function
