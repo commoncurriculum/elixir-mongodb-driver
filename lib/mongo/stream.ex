@@ -70,6 +70,7 @@ defmodule Mongo.Stream do
       fn
         %Mongo.Stream{docs: [], cursor: 0} = stream -> {:halt, stream}
         %Mongo.Stream{docs: []} = stream -> get_more(stream)
+        %Mongo.Stream{docs: %BSON.LazyDocuments{} = docs} = stream -> take(docs, stream)
         %Mongo.Stream{docs: docs} = stream -> {docs, %{stream | docs: []}}
         {:error, error} -> raise error
       end
@@ -100,9 +101,13 @@ defmodule Mongo.Stream do
         ]
         |> filter_nils()
 
-      case Mongo.exec_command_session(session, cmd, stream.opts) do
+      # getMore batches stay undecoded (BSON.LazyDocuments) until they are consumed.
+      case Mongo.exec_command_session(session, cmd, Keyword.put(stream.opts, :lazy_cursor, true)) do
         {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => []}, "ok" => ok}} when ok == 1 ->
           {cmd_tailable?(stream), %{stream | cursor: cursor_id}}
+
+        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => %BSON.LazyDocuments{} = docs}, "ok" => ok}} when ok == 1 ->
+          {[], %{stream | cursor: cursor_id, docs: docs}}
 
         {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => docs}, "ok" => ok}} when ok == 1 ->
           {docs, %{stream | cursor: cursor_id}}
@@ -110,6 +115,16 @@ defmodule Mongo.Stream do
         error ->
           raise error
       end
+    end
+
+    # Decoding a whole batch (up to 16 MB) at once keeps every document alive on the heap, and
+    # the garbage collector then spends most of the time copying them. It is decoded a chunk
+    # at a time instead.
+    @chunk_size 100
+
+    defp take(docs, stream) do
+      {docs, rest} = BSON.LazyDocuments.take(docs, @chunk_size)
+      {docs, %{stream | docs: rest}}
     end
 
     defp cmd_tailable?(%{cmd: cmd}) do

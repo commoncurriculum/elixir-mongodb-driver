@@ -1646,7 +1646,7 @@ defmodule Mongo do
           {:ok, BSON.document() | nil} | {:error, Mongo.Error.t()}
   def exec_command_session(session, cmd, opts) do
     with {:ok, conn, new_cmd, opts} <- Session.bind_session(session, cmd, opts),
-         {:ok, _cmd, response} <- DBConnection.execute(conn, %Query{action: {:command, new_cmd}}, [], opts),
+         {:ok, _cmd, response} <- execute(conn, %Query{action: {:command, new_cmd}}, opts),
          :ok <- Session.update_session(session, response, opts),
          {:ok, {_flags, doc}} <- check_for_error(response, cmd, opts) do
       {:ok, doc}
@@ -1660,25 +1660,49 @@ defmodule Mongo do
   @spec exec_command(GenServer.server(), BSON.document(), Keyword.t()) ::
           {:ok, {any(), BSON.document()} | nil} | {:error, Mongo.Error.t()}
   def exec_command(conn, cmd, opts) do
-    with {:ok, _cmd, response} <- DBConnection.execute(conn, %Query{action: {:command, cmd}}, [], opts) do
+    with {:ok, _cmd, response} <- execute(conn, %Query{action: {:command, cmd}}, opts) do
       check_for_error(response, cmd, opts)
     end
   end
 
+  # Cursor batches arrive undecoded (BSON.LazyDocuments, see Mongo.Messages) and are decoded
+  # here, so callers get the same replies as before. Only Mongo.Stream (with `lazy_cursor: true`)
+  # decodes its getMore batches itself, a few documents at a time; but when someone is
+  # subscribed to command events, which carry decoded replies, they are decoded here as well.
+  defp execute(conn, query, opts) do
+    with {:ok, query, {doc, event, flags, duration}} <- DBConnection.execute(conn, query, [], opts) do
+      case opts[:lazy_cursor] == true and Registry.lookup(:events_registry, :commands) == [] do
+        true -> {:ok, query, {doc, event, flags, duration}}
+        false -> materialize(query, {doc, event, flags, duration})
+      end
+    end
+  end
+
+  # The duration includes decoding, as before. Fails like a reply that cannot be decoded in the
+  # connection (see Mongo.MongoDBConnection.Utils).
+  defp materialize(query, {doc, event, flags, duration}) do
+    {decoding, doc} = :timer.tc(fn -> BSON.LazyDocuments.materialize(doc) end)
+    {:ok, query, {doc, event, flags, duration + decoding}}
+  rescue
+    error ->
+      Logger.error("Unable to send request to database because of #{inspect(error)}")
+      {:error, error}
+  end
+
   def exec_hello(conn, opts) do
-    with {:ok, _cmd, response} <- DBConnection.execute(conn, %Query{action: {:exec_hello, []}}, [], opts) do
+    with {:ok, _cmd, response} <- execute(conn, %Query{action: {:exec_hello, []}}, opts) do
       check_for_error(response, :exec_hello, opts)
     end
   end
 
   def exec_hello(conn, cmd, opts) do
-    with {:ok, _cmd, response} <- DBConnection.execute(conn, %Query{action: {:exec_hello, cmd}}, [], opts) do
+    with {:ok, _cmd, response} <- execute(conn, %Query{action: {:exec_hello, cmd}}, opts) do
       check_for_error(response, :exec_hello, opts)
     end
   end
 
   def exec_more_to_come(conn, opts) do
-    with {:ok, _cmd, response} <- DBConnection.execute(conn, %Query{action: :more_to_come}, [], opts) do
+    with {:ok, _cmd, response} <- execute(conn, %Query{action: :more_to_come}, opts) do
       check_for_error(response, :more_to_come, opts)
     end
   end
