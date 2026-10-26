@@ -195,8 +195,40 @@ defmodule Mongo.Session do
     {:error, Mongo.Error.exception("No session")}
   end
 
+  def bind_session(pid, cmd, opts) when is_list(cmd) do
+    # The session process only reads :readConcern from the command. Send it a
+    # copy with every other value replaced by a placeholder, so large values
+    # such as the documents of an insert are not copied there and back.
+    ref = make_ref()
+    {stub, values} = stub_command(cmd, ref)
+
+    case call(pid, {:bind_session, stub, opts}) do
+      {:ok, conn, bound, new_opts} -> {:ok, conn, restore_command(bound, ref, values), new_opts}
+      error -> error
+    end
+  end
+
+  # Not reached by the driver, which always sends keyword commands.
   def bind_session(pid, cmd, opts) do
     call(pid, {:bind_session, cmd, opts})
+  end
+
+  defp stub_command(cmd, ref) do
+    {stub, {_index, values}} =
+      Enum.map_reduce(cmd, {0, []}, fn
+        {key, value}, acc when key == :readConcern or value == nil -> {{key, value}, acc}
+        {key, value}, {index, values} -> {{key, {ref, index}}, {index + 1, [value | values]}}
+        other, acc -> {other, acc}
+      end)
+
+    {stub, values |> Enum.reverse() |> List.to_tuple()}
+  end
+
+  defp restore_command(stub, ref, values) do
+    Enum.map(stub, fn
+      {key, {^ref, index}} -> {key, elem(values, index)}
+      other -> other
+    end)
   end
 
   @doc """
@@ -469,6 +501,11 @@ defmodule Mongo.Session do
     {:next_state, :starting_transaction, %Session{data | recovery_token: nil, server_session: ServerSession.next_txn_num(session)}, :ok}
   end
 
+  ##
+  # The {:bind_session, ...} clauses receive a command whose values are placeholders
+  # (see bind_session/3), except :readConcern and nil values. They may add, drop
+  # and filter keys, but must not read any other value.
+  #
   ##
   # bind session: only if wire_version >= 6, MongoDB 3.6.x and no transaction is running: only lsid and the transaction-id is added
   #
