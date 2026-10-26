@@ -39,9 +39,15 @@ defmodule BSON.Encoder do
   # The fields are encoded into one binary, or into [prefix, tail] once a large
   # leaf is met: prefix is iodata and tail the binary later fields are added to.
   defp body(doc) when is_list(doc), do: fields(doc, :unknown, <<>>, doc)
-  defp body(doc) when is_map(doc) and not is_struct(doc), do: fields(:maps.to_list(doc), :unknown, <<>>, doc)
+  defp body(doc) when is_map(doc) and not is_struct(doc), do: fields(map_fields(doc), :unknown, <<>>, doc)
   # Anything else is read through Enumerable, so a struct that isn't Enumerable raises Protocol.UndefinedError.
   defp body(doc), do: fields(Enum.to_list(doc), :unknown, <<>>, doc)
+
+  # Fields in the order Enum.reduce/3 visits them, as before. A map of up to 32 keys
+  # is stored sorted, so :maps.to_list/1 gives that order; for a larger map it can
+  # differ from :maps.fold/3, which is what Enum.reduce/3 uses (e.g. on OTP 27).
+  defp map_fields(doc) when map_size(doc) <= 32, do: :maps.to_list(doc)
+  defp map_fields(doc), do: :lists.reverse(:maps.fold(fn key, value, acc -> [{key, value} | acc] end, [], doc))
 
   defp wrap(body), do: [<<size(body) + 4::int32()>>, body]
 
