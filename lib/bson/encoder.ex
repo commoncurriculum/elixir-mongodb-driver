@@ -15,11 +15,12 @@ defmodule BSON.Encoder do
   def document(doc), do: wrap(body(doc))
 
   def encode(value) when is_binary(value), do: [<<byte_size(value) + 1::int32()>>, value, 0x00]
-  def encode(true), do: <<0x01>>
-  def encode(false), do: <<0x00>>
+  def encode(true), do: 0x01
+  def encode(false), do: 0x00
   def encode(nil), do: <<>>
   def encode(:BSON_min), do: <<>>
   def encode(:BSON_max), do: <<>>
+  def encode(%BSON.JavaScript{code: code, scope: nil}), do: encode(code)
   def encode([]), do: wrap(body([]))
   def encode([{_, _} | _] = value), do: wrap(body(value))
   def encode(value) when is_list(value), do: wrap(array(value))
@@ -123,10 +124,10 @@ defmodule BSON.Encoder do
     do: <<acc::binary, @type_regex, key::binary, 0x00, IO.iodata_to_binary([pattern, 0x00, options, 0x00])::binary>>
 
   defp put(acc, key, %BSON.JavaScript{code: code, scope: nil}),
-    do: <<acc::binary, @type_js, key::binary, 0x00, IO.iodata_to_binary(encode(code))::binary>>
+    do: <<acc::binary, @type_js, key::binary, 0x00, IO.iodata_to_binary([encode(code)])::binary>>
 
   defp put(acc, key, %BSON.JavaScript{code: code, scope: scope}) do
-    code = IO.iodata_to_binary(encode(code))
+    code = IO.iodata_to_binary([encode(code)])
     scope = scope |> body() |> IO.iodata_to_binary()
     size = byte_size(code) + byte_size(scope) + 8
     <<acc::binary, @type_js_scope, key::binary, 0x00, size::int32(), code::binary, byte_size(scope) + 4::int32(), scope::binary>>
