@@ -131,9 +131,10 @@ defmodule BSON.DecoderGenerator do
         Enum.reverse(acc)
       end
 
-      # Scans for the terminating null byte without building a list per key. A key of up to
-      # 64 bytes is already copied by binary_part/3; a longer one would be a sub-binary that
-      # keeps the (possibly huge) reply binary alive, so it is copied explicitly.
+      # Scans for the terminating null byte without building a list per key. A key that
+      # binary_part/3 returns as a sub-binary would keep the (possibly huge) reply binary
+      # alive, so it is copied. Whether a short key is already a copy depends on the OTP
+      # version (on OTP 27 it is not), so this checks instead of going by length.
       defp cstring(binary), do: cstring(binary, binary, 0)
 
       defp cstring(<<0x00, rest::binary>>, orig, len) do
@@ -142,8 +143,9 @@ defmodule BSON.DecoderGenerator do
 
       defp cstring(<<_, rest::binary>>, orig, len), do: cstring(rest, orig, len + 1)
 
-      defp copy_key(key, len) when len > 64, do: :binary.copy(key)
-      defp copy_key(key, _len), do: key
+      defp copy_key(key, len) do
+        if :binary.referenced_byte_size(key) == len, do: key, else: :binary.copy(key)
+      end
 
       defp skip_cstring(<<0x00, rest::binary>>), do: rest
       defp skip_cstring(<<_, rest::binary>>), do: skip_cstring(rest)
