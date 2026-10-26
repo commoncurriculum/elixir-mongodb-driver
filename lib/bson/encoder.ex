@@ -47,7 +47,7 @@ defmodule BSON.Encoder do
   # is stored sorted, so :maps.to_list/1 gives that order; for a larger map it can
   # differ from :maps.fold/3, which is what Enum.reduce/3 uses (e.g. on OTP 27).
   defp map_fields(doc) when map_size(doc) <= 32, do: :maps.to_list(doc)
-  defp map_fields(doc), do: doc |> :maps.fold(fn key, value, acc -> [{key, value} | acc] end, []) |> :lists.reverse()
+  defp map_fields(doc), do: :lists.reverse(:maps.fold(fn key, value, acc -> [{key, value} | acc] end, [], doc))
 
   defp wrap(body), do: [<<size(body) + 4::int32()>>, body]
 
