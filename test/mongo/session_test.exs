@@ -29,6 +29,8 @@ defmodule Mongo.SessionTest do
   @tag :mongo_3_6
   test "start_session returns the topology's error when the selected server's pool is gone" do
     {:ok, top} = Mongo.TestConnection.connect()
+    {:ok, session} = Session.start_session(top, :write, [])
+    :ok = Session.end_session(top, session)
     :sys.replace_state(top, &%{&1 | connection_pools: %{}})
 
     assert {:error, %Mongo.Error{message: "The server " <> _no_longer_available}} = Session.start_session(top, :write, [])
