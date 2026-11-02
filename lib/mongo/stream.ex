@@ -25,7 +25,7 @@ defmodule Mongo.Stream do
     ## check, if retryable reads are enabled
     opts = Mongo.retryable_reads(opts)
 
-    with {:ok, {type, session}} <- checkout_session(topology_pid, opts) do
+    with {type, session} when type in [:own, :borrowed] <- checkout_session(topology_pid, opts) do
       case Mongo.exec_command_session(session, cmd, opts) do
         {:ok, %{"ok" => ok, "cursor" => cursor}} when ok == 1 ->
           %Mongo.Stream{topology_pid: topology_pid, session: {type, session}, cursor: cursor["id"], coll: cursor["ns"], docs: cursor["firstBatch"], cmd: cmd, opts: Keyword.put(opts, :session, session)}
@@ -45,11 +45,11 @@ defmodule Mongo.Stream do
     case Mongo.get_session(opts) do
       nil ->
         with {:ok, session} <- Session.start_session(topology_pid, :read, opts) do
-          {:ok, {:own, session}}
+          {:own, session}
         end
 
       session ->
-        {:ok, {:borrowed, session}}
+        {:borrowed, session}
     end
   end
 
