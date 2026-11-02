@@ -34,6 +34,7 @@ defmodule Mongo.SessionTest do
     :sys.replace_state(top, &%{&1 | connection_pools: %{}})
 
     assert {:error, %Mongo.Error{message: "The server " <> _no_longer_available}} = Session.start_session(top, :write, [])
+    assert {:error, %Mongo.Error{message: "The server " <> _no_longer_available}} = Mongo.find(top, "sessions", %{})
   end
 
   @tag :mongo_3_6
