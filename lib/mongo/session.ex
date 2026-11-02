@@ -147,6 +147,9 @@ defmodule Mongo.Session do
 
       :new_connection ->
         start_session(topology_pid, read_write_type, opts)
+
+      error ->
+        error
     end
   end
 
