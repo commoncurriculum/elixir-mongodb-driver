@@ -55,7 +55,6 @@ defmodule EventCatcher do
   end
 
   def handle_cast(:stop, state) do
-    Enum.each(Registry.keys(:events_registry, self()), &Registry.unregister(:events_registry, &1))
     {:stop, :normal, state}
   end
 
