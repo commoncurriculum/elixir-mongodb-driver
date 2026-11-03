@@ -16,7 +16,7 @@ jobs:
       matrix:
         mongodb-version: ["5.0", "6.0", "7.0", "8.0"]
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v2
 
