@@ -1831,7 +1831,7 @@ defmodule Mongo do
       :commands
     )
 
-    log_success(response, cmd, duration, opts)
+    log_success(response, cmd, duration, opts, %{database: Map.get(event, :database_name)})
 
     {:ok, {flags, response}}
   end
@@ -1846,7 +1846,7 @@ defmodule Mongo do
       :commands
     )
 
-    log_success(response, cmd, duration, opts)
+    log_success(response, cmd, duration, opts, %{database: Map.get(event, :database_name)})
 
     {:ok, {flags, response}}
   end
@@ -1866,7 +1866,7 @@ defmodule Mongo do
       :commands
     )
 
-    do_log(cmd, duration, opts)
+    do_log(cmd, duration, opts, %{database: Map.get(event, :database_name), error: error})
 
     {:error, error}
   end
@@ -1883,7 +1883,7 @@ defmodule Mongo do
       :commands
     )
 
-    do_log(cmd, duration, opts)
+    do_log(cmd, duration, opts, %{database: Map.get(event, :database_name), error: error})
 
     {:error, error}
   end
@@ -1931,23 +1931,27 @@ defmodule Mongo do
     do: raise(ArgumentError, "expected list of documents, got: #{inspect(other)}")
 
   # A getMore batch that is still undecoded is logged by Mongo.Stream once it has been decoded.
-  defp log_success(%{"cursor" => %{"nextBatch" => %BSON.LazyDocuments{}}}, _cmd, _duration, _opts), do: :ok
-  defp log_success(_response, cmd, duration, opts), do: do_log(cmd, duration, opts)
+  defp log_success(%{"cursor" => %{"nextBatch" => %BSON.LazyDocuments{}}}, _cmd, _duration, _opts, _extra), do: :ok
+
+  defp log_success(%{"writeErrors" => write_errors} = doc, cmd, duration, opts, extra),
+    do: do_log(cmd, duration, opts, Map.put(extra, :error, %Mongo.WriteError{n: doc["n"], ok: doc["ok"], write_errors: write_errors}))
+
+  defp log_success(_response, cmd, duration, opts, extra), do: do_log(cmd, duration, opts, extra)
 
   @doc false
   # Logs a command and emits its telemetry event, see exec_get_more/3.
-  def log_command(cmd, duration, opts), do: do_log(cmd, duration, opts)
+  def log_command(cmd, duration, opts), do: do_log(cmd, duration, opts, %{database: opts[:database]})
 
   ## support for logging like Ecto
-  defp do_log(:more_to_come, _duration, _opts) do
+  defp do_log(:more_to_come, _duration, _opts, _extra) do
     :ok
   end
 
-  defp do_log(:exec_hello, _duration, _opts) do
+  defp do_log(:exec_hello, _duration, _opts, _extra) do
     :ok
   end
 
-  defp do_log(cmd, duration, opts) do
+  defp do_log(cmd, duration, opts, extra) do
     case Keyword.has_key?(cmd, :isMaster) do
       true ->
         :ok
@@ -1981,16 +1985,18 @@ defmodule Mongo do
             false -> collection |> to_iodata() |> IO.iodata_to_binary()
           end
 
-        do_log(command, collection, params, duration, opts)
+        do_log(command, collection, params, duration, opts, extra)
     end
   end
 
-  defp do_log(command, collection, params, duration, opts) do
+  defp do_log(command, collection, params, duration, opts, extra) do
     metadata = %{
       type: :mongodb_driver,
       command: command,
       params: params,
       collection: collection,
+      database: extra[:database],
+      error: extra[:error],
       options: Keyword.get(opts, :telemetry_options, [])
     }
 
