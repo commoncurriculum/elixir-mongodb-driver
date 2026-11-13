@@ -1966,24 +1966,11 @@ defmodule Mongo do
 
         {collection, params} =
           case command do
-            :getMore ->
-              Keyword.pop_first(params, :collection)
-
-            :commitTransaction ->
-              {"-", params}
-
-            :abortTransaction ->
-              {"-", params}
-
-            _other ->
-              {Keyword.get(cmd, command), params}
+            :getMore -> Keyword.pop_first(params, :collection)
+            _other -> {Keyword.get(cmd, command), params}
           end
 
-        collection =
-          case is_binary(collection) do
-            true -> collection
-            false -> collection |> to_iodata() |> IO.iodata_to_binary()
-          end
+        collection = if is_binary(collection), do: collection
 
         do_log(command, collection, params, duration, opts, extra)
     end
@@ -2023,7 +2010,7 @@ defmodule Mongo do
       ?\s,
       Atom.to_string(command),
       ?\s,
-      to_iodata(collection),
+      to_iodata(collection || "-"),
       ?\s,
       to_iodata(params),
       [?\s, "db", ?=, :io_lib_format.fwrite_g(ms), ?m, ?s]
