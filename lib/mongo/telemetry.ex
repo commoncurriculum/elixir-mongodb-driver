@@ -11,11 +11,12 @@ defmodule Mongo.Telemetry do
         result
 
       false ->
-        {command, collection, _params} = parts(cmd)
+        {command, collection, params} = parts(cmd)
 
         metadata = %{
           command: command,
           collection: collection,
+          params: params,
           database: opts[:database],
           caller: Keyword.get(opts, :caller, self()),
           options: Keyword.get(opts, :telemetry_options, [])
