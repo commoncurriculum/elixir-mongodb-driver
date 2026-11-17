@@ -553,7 +553,7 @@ defmodule Mongo.Topology do
     state =
       Enum.reduce(added, state, fn address, state ->
         server_description = state.topology.servers[address]
-        connopts = connect_opts_from_address(state.opts, address)
+        connopts = state.opts |> Keyword.delete(:label) |> connect_opts_from_address(address)
         args = [server_description.address, self(), heartbeat_frequency_ms, Keyword.put(connopts, :pool, DBConnection.ConnectionPool)]
         {:ok, pid} = Monitor.start_link(args)
 

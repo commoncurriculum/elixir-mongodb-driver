@@ -31,6 +31,33 @@ defmodule Mongo.TelemetryTest do
     assert error.code == 2
   end
 
+  test "only the client pool carries the topology's label, not the monitors' connections" do
+    test = self()
+    id = make_ref()
+
+    :telemetry.attach(id, [:db_connection, :checkout], fn _, _, metadata, _ -> send(test, {:checkout, metadata}) end, nil)
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    {:ok, top} = Mongo.start_link(database: "mongodb_test", seeds: ["127.0.0.1:27017"], label: :labeled_topology)
+    {:ok, _} = Mongo.command(top, ping: 1)
+    Process.sleep(200)
+
+    {labeled, unlabeled} =
+      Stream.repeatedly(fn ->
+        receive do
+          {:checkout, metadata} -> metadata
+        after
+          0 -> nil
+        end
+      end)
+      |> Enum.take_while(& &1)
+      |> Enum.split_with(&(&1.label == :labeled_topology))
+
+    assert [_ | _] = labeled
+    assert [_ | _] = unlabeled
+    assert [_client_pool] = labeled |> Enum.map(& &1.pool) |> Enum.uniq()
+  end
+
   test "the execution event carries the write errors of a write that failed", %{pid: top, coll: coll} do
     {:error, error} = Mongo.update_one(top, coll, %{}, %{"$bad" => %{name: "b"}})
     assert_receive {:executed, %{command: :update, collection: ^coll, error: ^error}}
