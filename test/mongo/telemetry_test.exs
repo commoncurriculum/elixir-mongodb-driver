@@ -83,6 +83,18 @@ defmodule Mongo.TelemetryTest do
     assert duration > 0
   end
 
+  test "a command names a collection only when it acts on one", %{pid: top, coll: coll} do
+    attach_commands(self())
+    {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
+    {:ok, _} = Mongo.admin_command(top, renameCollection: "mongodb_test.#{coll}", to: "mongodb_test.#{coll}_renamed")
+    {:ok, _} = Mongo.admin_command(top, configureFailPoint: "failCommand", mode: "off")
+    renamed = "#{coll}_renamed"
+
+    assert_receive {:command, :start, _, %{command: :renameCollection, collection: ^coll}}
+    assert_receive {:command, :start, _, %{command: :configureFailPoint, collection: nil}}
+    {:ok, _} = Mongo.command(top, drop: renamed)
+  end
+
   test "a command that fails on the server stops with its error", %{pid: top, coll: coll} do
     attach_commands(self())
     {:error, error} = Mongo.find_one(top, coll, %{"$bad" => 1})

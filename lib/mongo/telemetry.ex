@@ -1,6 +1,27 @@
 defmodule Mongo.Telemetry do
   @moduledoc false
 
+  @collection_commands [
+    :aggregate,
+    :collMod,
+    :collStats,
+    :count,
+    :create,
+    :createIndexes,
+    :delete,
+    :distinct,
+    :drop,
+    :dropIndexes,
+    :find,
+    :findAndModify,
+    :insert,
+    :killCursors,
+    :listIndexes,
+    :mapReduce,
+    :update,
+    :validate
+  ]
+
   @type response :: {BSON.document(), map, integer, non_neg_integer} | nil
 
   @spec span(BSON.document(), Keyword.t(), (-> {result, response})) :: result when result: var
@@ -31,16 +52,23 @@ defmodule Mongo.Telemetry do
 
   @spec parts(BSON.document()) :: {atom, String.t() | nil, Keyword.t()}
   def parts(cmd) do
-    [{command, _} | _] = cmd
+    [{command, value} | _] = cmd
     {_, params} = Keyword.pop_first(cmd, command)
 
-    {collection, params} =
-      case command do
-        :getMore -> Keyword.pop_first(params, :collection)
-        _other -> {Keyword.get(cmd, command), params}
-      end
+    case command do
+      :getMore ->
+        {collection, params} = Keyword.pop_first(params, :collection)
+        {command, collection, params}
 
-    {command, if(is_binary(collection), do: collection), params}
+      :renameCollection when is_binary(value) ->
+        {command, value |> String.split(".", parts: 2) |> List.last(), params}
+
+      command when command in @collection_commands and is_binary(value) ->
+        {command, value, params}
+
+      command ->
+        {command, nil, params}
+    end
   end
 
   @spec reply_error(map) :: Mongo.WriteError.t() | Mongo.Error.t() | nil
