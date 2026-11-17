@@ -16,9 +16,7 @@ defmodule Mongo.Stream do
     :coll,
     :docs,
     :cmd,
-    :opts,
-    # {getMore command, duration} of the batch in `docs` while it is decoded, see get_more/1.
-    :batch_log
+    :opts
   ]
 
   def new(topology_pid, cmd, opts) do
@@ -83,13 +81,10 @@ defmodule Mongo.Stream do
 
     defp after_fun() do
       fn
-        %Mongo.Stream{topology_pid: topology_pid, session: {type, session}, cursor: 0} = stream ->
-          log_batch(stream)
+        %Mongo.Stream{topology_pid: topology_pid, session: {type, session}, cursor: 0} ->
           Mongo.Stream.checkin_session(type, session, topology_pid)
 
         %Mongo.Stream{topology_pid: topology_pid, session: {type, session}} = stream ->
-          log_batch(stream)
-
           with :ok <- kill_cursors(stream) do
             Mongo.Stream.checkin_session(type, session, topology_pid)
           end
@@ -109,17 +104,14 @@ defmodule Mongo.Stream do
         ]
         |> filter_nils()
 
-      # getMore batches stay undecoded (BSON.LazyDocuments) until they are consumed. Such a
-      # getMore is logged once its batch is decoded, with the decoding time added to its
-      # duration, as when it was decoded on arrival.
       case Mongo.exec_get_more(session, cmd, stream.opts) do
-        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => []}, "ok" => ok}, _duration, _database} when ok == 1 ->
+        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => []}, "ok" => ok}} when ok == 1 ->
           {cmd_tailable?(stream), %{stream | cursor: cursor_id}}
 
-        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => %BSON.LazyDocuments{} = docs}, "ok" => ok}, duration, database} when ok == 1 ->
-          {[], %{stream | cursor: cursor_id, docs: docs, batch_log: {cmd, duration, database}}}
+        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => %BSON.LazyDocuments{} = docs}, "ok" => ok}} when ok == 1 ->
+          {[], %{stream | cursor: cursor_id, docs: docs}}
 
-        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => docs}, "ok" => ok}, _duration, _database} when ok == 1 ->
+        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => docs}, "ok" => ok}} when ok == 1 ->
           {docs, %{stream | cursor: cursor_id}}
 
         error ->
@@ -132,28 +124,15 @@ defmodule Mongo.Stream do
     # at a time instead.
     @chunk_size 100
 
-    defp take(docs, %{batch_log: {cmd, duration, database}} = stream) do
-      {decoding, {docs, rest}} = :timer.tc(fn -> BSON.LazyDocuments.take(docs, @chunk_size) end)
-      stream = %{stream | docs: rest, batch_log: {cmd, duration + decoding, database}}
-
-      case rest do
-        [] -> {docs, log_batch(stream)}
-        _rest -> {docs, stream}
-      end
+    defp take(docs, stream) do
+      {docs, rest} = BSON.LazyDocuments.take(docs, @chunk_size)
+      {docs, %{stream | docs: rest}}
     rescue
-      # Fails like a getMore whose reply cannot be decoded (see Mongo.MongoDBConnection.Utils),
-      # which is not logged.
+      # Fails like a getMore whose reply cannot be decoded (see Mongo.MongoDBConnection.Utils).
       error ->
         Logger.error("Unable to send request to database because of #{inspect(error)}")
-        {[], %{stream | docs: {:error, error}, batch_log: nil}}
+        {[], %{stream | docs: {:error, error}}}
     end
-
-    defp log_batch(%{batch_log: {cmd, duration, database}} = stream) do
-      Mongo.log_command(cmd, duration, database, stream.opts)
-      %{stream | batch_log: nil}
-    end
-
-    defp log_batch(stream), do: stream
 
     defp cmd_tailable?(%{cmd: cmd}) do
       case cmd[:tailable] == true do

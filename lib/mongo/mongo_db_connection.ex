@@ -304,7 +304,8 @@ defmodule Mongo.MongoDBConnection do
       database_name: db,
       request_id: state.request_id,
       operation_id: opts[:operation_id],
-      connection_id: self()
+      connection_id: self(),
+      address: state.host
     }
 
     Events.notify(event, :commands)
@@ -370,7 +371,8 @@ defmodule Mongo.MongoDBConnection do
       database_name: db,
       request_id: state.request_id,
       operation_id: opts[:operation_id],
-      connection_id: self()
+      connection_id: self(),
+      address: state.host
     }
 
     Events.notify(event, :commands)
@@ -407,7 +409,8 @@ defmodule Mongo.MongoDBConnection do
       database_name: opts[:database] || state.database,
       request_id: state.request_id,
       operation_id: opts[:operation_id],
-      connection_id: self()
+      connection_id: self(),
+      address: state.host
     }
 
     flags = Keyword.take(opts, @find_one_flags)
