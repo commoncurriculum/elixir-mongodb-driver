@@ -174,11 +174,11 @@ defmodule Mongo.Session do
   """
   @spec commit_transaction(Session.t(), DateTime.t()) :: :ok | {:error, term()}
   def commit_transaction(pid) do
-    call(pid, {:commit_transaction, DateTime.utc_now()})
+    call(pid, {:commit_transaction, DateTime.utc_now(), self()})
   end
 
   def commit_transaction(pid, start_time) do
-    call(pid, {:commit_transaction, start_time})
+    call(pid, {:commit_transaction, start_time, self()})
   end
 
   @doc """
@@ -186,7 +186,7 @@ defmodule Mongo.Session do
   """
   @spec abort_transaction(Session.t()) :: :ok | {:error, term()}
   def abort_transaction(pid) do
-    call(pid, :abort_transaction)
+    call(pid, {:abort_transaction, self()})
   end
 
   @doc """
@@ -580,31 +580,31 @@ defmodule Mongo.Session do
     {:keep_state_and_data, {:ok, conn, cmd, client_opts}}
   end
 
-  def handle_call_event({:commit_transaction, _start_time}, :starting_transaction, _data) do
+  def handle_call_event({:commit_transaction, _start_time, _caller}, :starting_transaction, _data) do
     {:next_state, :transaction_committed, :ok}
   end
 
-  def handle_call_event({:commit_transaction, start_time}, :transaction_in_progress, data) do
-    case run_commit_command(data, start_time) do
+  def handle_call_event({:commit_transaction, start_time, caller}, :transaction_in_progress, data) do
+    case run_commit_command(data, start_time, caller) do
       :ok -> {:next_state, :transaction_committed, :ok}
       error -> {:keep_state_and_data, error}
     end
   end
 
   ## in other cases we will ignore the commit command
-  def handle_call_event({:commit_transaction, _start_time}, _state, _data) do
+  def handle_call_event({:commit_transaction, _start_time, _caller}, _state, _data) do
     {:keep_state_and_data, :ok}
   end
 
-  def handle_call_event(:abort_transaction, :starting_transaction, _data) do
+  def handle_call_event({:abort_transaction, _caller}, :starting_transaction, _data) do
     {:next_state, :transaction_aborted, :ok}
   end
 
-  def handle_call_event(:abort_transaction, :transaction_in_progress, data) do
-    {:next_state, :transaction_aborted, run_abort_command(data)}
+  def handle_call_event({:abort_transaction, caller}, :transaction_in_progress, data) do
+    {:next_state, :transaction_aborted, run_abort_command(data, caller)}
   end
 
-  def handle_call_event(:abort_transaction, _state, _data) do
+  def handle_call_event({:abort_transaction, _caller}, _state, _data) do
     {:keep_state_and_data, :ok}
   end
 
@@ -653,11 +653,11 @@ defmodule Mongo.Session do
   ##
   # Run the commit transaction command.
   #
-  defp run_commit_command(session, start_time) do
-    run_commit_command(session, start_time, :first)
+  defp run_commit_command(session, start_time, caller) do
+    run_commit_command(session, start_time, caller, :first)
   end
 
-  defp run_commit_command(%Session{conn: conn, recovery_token: recovery_token, server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts} = session, time, n) do
+  defp run_commit_command(%Session{conn: conn, recovery_token: recovery_token, server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts} = session, time, caller, n) do
     ##
     # Drivers should apply a majority write concern when retrying commitTransaction to guard against a transaction being applied twice.
     write_concern =
@@ -678,7 +678,7 @@ defmodule Mongo.Session do
       ]
       |> filter_nils()
 
-    case Mongo.exec_command(conn, cmd, database: "admin") do
+    case Mongo.exec_command(conn, cmd, database: "admin", caller: caller) do
       {:ok, _doc} ->
         :ok
 
@@ -687,7 +687,7 @@ defmodule Mongo.Session do
         try_again = Error.has_label(error, "UnknownTransactionCommitResult") && DateTime.diff(DateTime.utc_now(), time, :second) < timeout
 
         case try_again do
-          true -> run_commit_command(session, time, :retry)
+          true -> run_commit_command(session, time, caller, :retry)
           false -> {:error, error}
         end
     end
@@ -703,7 +703,7 @@ defmodule Mongo.Session do
   ##
   # Run the abort transaction command.
   #
-  defp run_abort_command(%Session{conn: conn, server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts}) do
+  defp run_abort_command(%Session{conn: conn, server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts}, caller) do
     cmd =
       [
         abortTransaction: 1,
@@ -714,7 +714,7 @@ defmodule Mongo.Session do
       ]
       |> filter_nils()
 
-    _doc = Mongo.exec_command(conn, cmd, database: "admin")
+    _doc = Mongo.exec_command(conn, cmd, database: "admin", caller: caller)
 
     :ok
   end
