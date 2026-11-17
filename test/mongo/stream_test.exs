@@ -114,7 +114,7 @@ defmodule Mongo.StreamTest do
   defp with_lazy_batch(stream, decoder, docs) do
     binary = docs |> Enum.with_index() |> Enum.map(fn {doc, i} -> [0x03, Integer.to_string(i), 0, BSON.Encoder.document(doc)] end) |> IO.iodata_to_binary()
     get_more = [getMore: %BSON.LongNumber{value: stream.cursor}, collection: stream.coll |> String.split(".") |> List.last()]
-    %{stream | docs: %BSON.LazyDocuments{binary: binary, decoder: decoder}, batch_log: {get_more, 0}}
+    %{stream | docs: %BSON.LazyDocuments{binary: binary, decoder: decoder}, batch_log: {get_more, 0, "mongodb_test"}}
   end
 
   def forward_execution(_event, %{duration: duration}, %{command: command}, parent), do: send(parent, {:executed, command, duration})
@@ -153,6 +153,18 @@ defmodule Mongo.StreamTest do
     assert_received {:executed, :find, _duration}
     for _ <- 1..3, do: assert_received({:executed, :getMore, _duration})
     refute_received {:executed, :getMore, _duration}
+  end
+
+  def forward_database(_event, _measurements, %{command: command, database: database}, parent), do: send(parent, {:database, command, database})
+
+  test "getMores decoded as they are consumed are logged with their database", %{pid: top, coll: coll, catcher: catcher, test: test} do
+    without_command_subscribers(catcher)
+    :telemetry.attach("#{inspect(test)}", [:mongodb_driver, :execution], &__MODULE__.forward_database/4, self())
+    on_exit(fn -> :telemetry.detach("#{inspect(test)}") end)
+
+    assert 1_000 == top |> Mongo.find(coll, %{}, batch_size: 300) |> Enum.count()
+    for _ <- 1..3, do: assert_received({:database, :getMore, "mongodb_test"})
+    refute_received {:database, :getMore, _database}
   end
 
   test "the logged duration of a getMore includes decoding its batch", %{pid: top, coll: coll, test: test} do
