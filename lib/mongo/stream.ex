@@ -113,13 +113,13 @@ defmodule Mongo.Stream do
       # getMore is logged once its batch is decoded, with the decoding time added to its
       # duration, as when it was decoded on arrival.
       case Mongo.exec_get_more(session, cmd, stream.opts) do
-        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => []}, "ok" => ok}, _duration} when ok == 1 ->
+        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => []}, "ok" => ok}, _duration, _database} when ok == 1 ->
           {cmd_tailable?(stream), %{stream | cursor: cursor_id}}
 
-        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => %BSON.LazyDocuments{} = docs}, "ok" => ok}, duration} when ok == 1 ->
-          {[], %{stream | cursor: cursor_id, docs: docs, batch_log: {cmd, duration}}}
+        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => %BSON.LazyDocuments{} = docs}, "ok" => ok}, duration, database} when ok == 1 ->
+          {[], %{stream | cursor: cursor_id, docs: docs, batch_log: {cmd, duration, database}}}
 
-        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => docs}, "ok" => ok}, _duration} when ok == 1 ->
+        {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => docs}, "ok" => ok}, _duration, _database} when ok == 1 ->
           {docs, %{stream | cursor: cursor_id}}
 
         error ->
@@ -132,9 +132,9 @@ defmodule Mongo.Stream do
     # at a time instead.
     @chunk_size 100
 
-    defp take(docs, %{batch_log: {cmd, duration}} = stream) do
+    defp take(docs, %{batch_log: {cmd, duration, database}} = stream) do
       {decoding, {docs, rest}} = :timer.tc(fn -> BSON.LazyDocuments.take(docs, @chunk_size) end)
-      stream = %{stream | docs: rest, batch_log: {cmd, duration + decoding}}
+      stream = %{stream | docs: rest, batch_log: {cmd, duration + decoding, database}}
 
       case rest do
         [] -> {docs, log_batch(stream)}
@@ -148,8 +148,8 @@ defmodule Mongo.Stream do
         {[], %{stream | docs: {:error, error}, batch_log: nil}}
     end
 
-    defp log_batch(%{batch_log: {cmd, duration}} = stream) do
-      Mongo.log_command(cmd, duration, stream.opts)
+    defp log_batch(%{batch_log: {cmd, duration, database}} = stream) do
+      Mongo.log_command(cmd, duration, database, stream.opts)
       %{stream | batch_log: nil}
     end
 

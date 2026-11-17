@@ -1645,7 +1645,7 @@ defmodule Mongo do
   @spec exec_command_session(GenServer.server(), BSON.document(), Keyword.t()) ::
           {:ok, BSON.document() | nil} | {:error, Mongo.Error.t()}
   def exec_command_session(session, cmd, opts) do
-    with {:ok, doc, _duration} <- run_command_session(session, cmd, opts) do
+    with {:ok, doc, _duration, _database} <- run_command_session(session, cmd, opts) do
       {:ok, doc}
     end
   end
@@ -1653,20 +1653,20 @@ defmodule Mongo do
   @doc false
   # Used by Mongo.Stream. Runs a getMore and returns its batch undecoded (BSON.LazyDocuments)
   # unless someone is subscribed to command events. The log and the telemetry event of such a
-  # getMore are left to the caller (see log_command/3), so that their duration can still
+  # getMore are left to the caller (see log_command/4), so that their duration can still
   # include decoding the batch.
   @spec exec_get_more(GenServer.server(), BSON.document(), Keyword.t()) ::
-          {:ok, BSON.document(), non_neg_integer} | {:error, Mongo.Error.t()}
+          {:ok, BSON.document(), non_neg_integer, String.t()} | {:error, Mongo.Error.t()}
   def exec_get_more(session, cmd, opts) do
     run_command_session(session, cmd, Keyword.put(opts, :lazy_cursor, true))
   end
 
   defp run_command_session(session, cmd, opts) do
     with {:ok, conn, new_cmd, opts} <- Session.bind_session(session, cmd, opts),
-         {:ok, _cmd, {_doc, _event, _flags, duration} = response} <- execute(conn, %Query{action: {:command, new_cmd}}, opts),
+         {:ok, _cmd, {_doc, event, _flags, duration} = response} <- execute(conn, %Query{action: {:command, new_cmd}}, opts),
          :ok <- Session.update_session(session, response, opts),
          {:ok, {_flags, doc}} <- check_for_error(response, cmd, opts) do
-      {:ok, doc, duration}
+      {:ok, doc, duration, Map.get(event, :database_name)}
     else
       {:error, error} ->
         {:error, error}
@@ -1940,7 +1940,7 @@ defmodule Mongo do
 
   @doc false
   # Logs a command and emits its telemetry event, see exec_get_more/3.
-  def log_command(cmd, duration, opts), do: do_log(cmd, duration, opts, %{database: opts[:database]})
+  def log_command(cmd, duration, database, opts), do: do_log(cmd, duration, opts, %{database: database})
 
   ## support for logging like Ecto
   defp do_log(:more_to_come, _duration, _opts, _extra) do
