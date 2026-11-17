@@ -79,7 +79,8 @@ defmodule Mongo.TelemetryTest do
 
     assert_receive {:command, :start, %{system_time: _}, %{command: :insert, collection: ^coll, caller: caller, telemetry_span_context: ref}}
     assert caller == self()
-    assert_receive {:command, :stop, %{duration: duration}, %{command: :insert, collection: ^coll, database: "mongodb_test", address: "127.0.0.1:27017", error: nil, telemetry_span_context: ^ref}}
+    assert_receive {:command, :stop, %{duration: duration}, %{command: :insert, collection: ^coll, database: "mongodb_test", address: address, error: nil, telemetry_span_context: ^ref}}
+    assert address =~ ":27017"
     assert duration > 0
   end
 
@@ -87,11 +88,11 @@ defmodule Mongo.TelemetryTest do
     attach_commands(self())
     {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
     {:ok, _} = Mongo.admin_command(top, renameCollection: "mongodb_test.#{coll}", to: "mongodb_test.#{coll}_renamed")
-    {:ok, _} = Mongo.admin_command(top, configureFailPoint: "failCommand", mode: "off")
+    {:ok, _} = Mongo.admin_command(top, getParameter: "*")
     renamed = "#{coll}_renamed"
 
     assert_receive {:command, :start, _, %{command: :renameCollection, collection: ^coll}}
-    assert_receive {:command, :start, _, %{command: :configureFailPoint, collection: nil}}
+    assert_receive {:command, :start, _, %{command: :getParameter, collection: nil}}
     {:ok, _} = Mongo.command(top, drop: renamed)
   end
 
@@ -101,15 +102,15 @@ defmodule Mongo.TelemetryTest do
     assert_receive {:command, :stop, _, %{command: :find, error: ^error}}
   end
 
-  test "a command whose connection times out stops with the network error", %{pid: top} do
-    fail_point = [configureFailPoint: "failCommand", mode: [times: 1], data: [blockConnection: true, blockTimeMS: 500, failCommands: ["listCommands"]]]
-    {:ok, _} = Mongo.admin_command(top, fail_point)
+  test "a command whose connection times out stops with the network error", %{pid: top, coll: coll} do
+    {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
     attach_commands(self())
 
-    {:error, %Mongo.Error{message: message} = error} = Mongo.command(top, [listCommands: 1], timeout: 100)
+    {:error, %Mongo.Error{message: message} = error} = Mongo.find_one(top, coll, %{"$where" => "sleep(500) || true"}, timeout: 100)
 
     assert message =~ "tcp recv"
-    assert_receive {:command, :stop, _, %{command: :listCommands, address: "127.0.0.1:27017", error: ^error}}
+    assert_receive {:command, :stop, _, %{command: :find, collection: ^coll, address: address, error: ^error}}
+    assert address =~ ":27017"
   end
 
   test "a getMore stops when its reply arrives, before its batch is consumed", %{pid: top, coll: coll} do
