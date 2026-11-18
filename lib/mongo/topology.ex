@@ -121,6 +121,7 @@ defmodule Mongo.Topology do
     local_threshold_ms = Keyword.get(opts, :local_threshold_ms, 15)
 
     :ok = Mongo.Events.notify(%TopologyOpeningEvent{topology_pid: self()})
+    :ok = Mongo.Telemetry.register_topology(opts[:database], seeds)
 
     cond do
       type == :single and length(seeds) > 1 ->

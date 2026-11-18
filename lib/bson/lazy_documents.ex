@@ -3,8 +3,8 @@ defmodule BSON.LazyDocuments do
   The documents of a cursor batch, kept as raw BSON and decoded on demand.
 
   Command replies are decoded with their cursor batch (`cursor.firstBatch` or
-  `cursor.nextBatch`) in this form. `Mongo.exec_command/3` and
-  `Mongo.exec_command_session/3` decode it into a list before returning, unless they are
+  `cursor.nextBatch`) in this form. `Mongo.run_command/3` and
+  `Mongo.run_command_session/3` decode it into a list before returning, unless they are
   called with `lazy_cursor: true`, as `Mongo.Stream` does for `getMore` batches: it
   decodes them a few documents at a time while the stream is consumed, so a large batch
   never sits fully decoded on the heap. Users of the driver do not see it.

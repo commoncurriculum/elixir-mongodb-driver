@@ -203,7 +203,7 @@ defmodule Mongo.BulkWrite do
       ops
       |> get_op_sequence()
       |> Enum.reduce_while(empty, fn {cmd, docs}, acc ->
-        temp_result = one_bulk_write_operation(session, cmd, coll, docs, max_batch_size, opts)
+        temp_result = one_bulk_write_operation(topology_pid, session, cmd, coll, docs, max_batch_size, opts)
 
         case temp_result do
           %{errors: []} ->
@@ -231,11 +231,11 @@ defmodule Mongo.BulkWrite do
       max_batch_size = limits.max_write_batch_size
 
       results =
-        case one_bulk_write_operation(session, :insert, coll, inserts, max_batch_size, opts) do
+        case one_bulk_write_operation(topology_pid, session, :insert, coll, inserts, max_batch_size, opts) do
           %{errors: []} = insert_result ->
-            case one_bulk_write_operation(session, :update, coll, updates, max_batch_size, opts) do
+            case one_bulk_write_operation(topology_pid, session, :update, coll, updates, max_batch_size, opts) do
               %{errors: []} = update_result ->
-                delete_result = one_bulk_write_operation(session, :delete, coll, deletes, max_batch_size, opts)
+                delete_result = one_bulk_write_operation(topology_pid, session, :delete, coll, deletes, max_batch_size, opts)
                 [insert_result, update_result, delete_result]
 
               update_result ->
@@ -253,9 +253,9 @@ defmodule Mongo.BulkWrite do
   ###
   # Executes the command `cmd` and collects the result.
   #
-  defp one_bulk_write_operation(session, cmd, coll, docs, max_batch_size, opts) do
+  defp one_bulk_write_operation(topology_pid, session, cmd, coll, docs, max_batch_size, opts) do
     session
-    |> run_commands(get_cmds(cmd, coll, docs, max_batch_size, opts), opts)
+    |> run_commands(topology_pid, get_cmds(cmd, coll, docs, max_batch_size, opts), opts)
     |> collect(cmd)
   end
 
@@ -351,12 +351,12 @@ defmodule Mongo.BulkWrite do
   defp filter_upsert_ids([_ | _] = upserted), do: Enum.map(upserted, fn doc -> doc["_id"] end)
   defp filter_upsert_ids(_), do: []
 
-  defp run_commands(session, {cmds, ids}, opts) do
-    {Enum.map(cmds, fn cmd -> Mongo.exec_command_session(session, cmd, opts) end), ids}
+  defp run_commands(session, topology_pid, {cmds, ids}, opts) do
+    {Enum.map(cmds, fn cmd -> Mongo.exec_command_session(topology_pid, session, cmd, opts) end), ids}
   end
 
-  defp run_commands(session, cmds, opts) do
-    Enum.map(cmds, fn cmd -> Mongo.exec_command_session(session, cmd, opts) end)
+  defp run_commands(session, topology_pid, cmds, opts) do
+    Enum.map(cmds, fn cmd -> Mongo.exec_command_session(topology_pid, session, cmd, opts) end)
   end
 
   defp get_insert_cmds(coll, docs, max_batch_size, opts) do

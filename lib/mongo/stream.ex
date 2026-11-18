@@ -20,22 +20,30 @@ defmodule Mongo.Stream do
   ]
 
   def new(topology_pid, cmd, opts) do
+    Mongo.Telemetry.span(topology_pid, cmd, opts, fn -> open(topology_pid, cmd, opts) end)
+  end
+
+  defp open(topology_pid, cmd, opts) do
     ## check, if retryable reads are enabled
     opts = Mongo.retryable_reads(opts)
 
-    with {type, session} when type in [:own, :borrowed] <- checkout_session(topology_pid, opts) do
-      case Mongo.exec_command_session(session, cmd, opts) do
-        {:ok, %{"ok" => ok, "cursor" => cursor}} when ok == 1 ->
-          %Mongo.Stream{topology_pid: topology_pid, session: {type, session}, cursor: cursor["id"], coll: cursor["ns"], docs: cursor["firstBatch"], cmd: cmd, opts: Keyword.put(opts, :session, session)}
+    case checkout_session(topology_pid, opts) do
+      {type, session} when type in [:own, :borrowed] ->
+        case Mongo.run_command_session(session, cmd, opts) do
+          {{:ok, {_flags, %{"ok" => ok, "cursor" => cursor}}}, attempt} when ok == 1 ->
+            {%Mongo.Stream{topology_pid: topology_pid, session: {type, session}, cursor: cursor["id"], coll: cursor["ns"], docs: cursor["firstBatch"], cmd: cmd, opts: Keyword.put(opts, :session, session)}, attempt}
 
-        {:error, error} ->
-          checkin_session(type, session, topology_pid)
+          {{:error, error}, attempt} ->
+            checkin_session(type, session, topology_pid)
 
-          case Error.should_retry_read(error, cmd, opts) do
-            true -> new(topology_pid, cmd, Keyword.put(opts, :read_counter, 2))
-            false -> {:error, error}
-          end
-      end
+            case Error.should_retry_read(error, cmd, opts) do
+              true -> open(topology_pid, cmd, Keyword.put(opts, :read_counter, 2))
+              false -> {{:error, error}, attempt}
+            end
+        end
+
+      error ->
+        {error, nil}
     end
   end
 
@@ -104,7 +112,7 @@ defmodule Mongo.Stream do
         ]
         |> filter_nils()
 
-      case Mongo.exec_get_more(session, cmd, stream.opts) do
+      case Mongo.exec_get_more(stream.topology_pid, session, cmd, stream.opts) do
         {:ok, %{"cursor" => %{"id" => cursor_id, "nextBatch" => []}, "ok" => ok}} when ok == 1 ->
           {cmd_tailable?(stream), %{stream | cursor: cursor_id}}
 
@@ -151,7 +159,7 @@ defmodule Mongo.Stream do
         cursors: [%BSON.LongNumber{value: stream.cursor}]
       ]
 
-      with {:ok, %{"cursorsAlive" => [], "cursorsNotFound" => [], "cursorsUnknown" => [], "ok" => ok}} when ok == 1 <- Mongo.exec_command_session(session, cmd, stream.opts) do
+      with {:ok, %{"cursorsAlive" => [], "cursorsNotFound" => [], "cursorsUnknown" => [], "ok" => ok}} when ok == 1 <- Mongo.exec_command_session(stream.topology_pid, session, cmd, stream.opts) do
         :ok
       end
     end
