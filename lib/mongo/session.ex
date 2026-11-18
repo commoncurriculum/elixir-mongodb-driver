@@ -173,33 +173,12 @@ defmodule Mongo.Session do
   Commit the current transaction.
   """
   @spec commit_transaction(Session.t(), DateTime.t()) :: :ok | {:error, term()}
-  def commit_transaction(pid, start_time \\ DateTime.utc_now()) do
-    case call(pid, :commit_command) do
-      {:run, topology, conn, cmd, retry_cmd, timeout} ->
-        case Mongo.Telemetry.span(topology, cmd, [database: "admin"], fn -> run_commit(conn, cmd, retry_cmd, start_time, timeout) end) do
-          {:ok, _doc} -> call(pid, :transaction_committed)
-          error -> error
-        end
-
-      reply ->
-        reply
-    end
+  def commit_transaction(pid) do
+    call(pid, {:commit_transaction, DateTime.utc_now()})
   end
 
-  ##
-  # Drivers should apply a majority write concern when retrying commitTransaction to guard against a transaction being applied twice.
-  #
-  defp run_commit(conn, cmd, retry_cmd, start_time, timeout) do
-    case Mongo.run_command(conn, cmd, database: "admin") do
-      {{:error, error}, attempt} ->
-        case Error.has_label(error, "UnknownTransactionCommitResult") && DateTime.diff(DateTime.utc_now(), start_time, :second) < timeout do
-          true -> run_commit(conn, retry_cmd, retry_cmd, start_time, timeout)
-          false -> {{:error, error}, attempt}
-        end
-
-      {{:ok, {_flags, doc}}, attempt} ->
-        {{:ok, doc}, attempt}
-    end
+  def commit_transaction(pid, start_time) do
+    call(pid, {:commit_transaction, start_time})
   end
 
   @doc """
@@ -207,14 +186,7 @@ defmodule Mongo.Session do
   """
   @spec abort_transaction(Session.t()) :: :ok | {:error, term()}
   def abort_transaction(pid) do
-    case call(pid, :abort_command) do
-      {:run, topology, conn, cmd} ->
-        _result = Mongo.Telemetry.span(topology, cmd, [database: "admin"], fn -> Mongo.run_command(conn, cmd, database: "admin") end)
-        :ok
-
-      reply ->
-        reply
-    end
+    call(pid, :abort_transaction)
   end
 
   @doc """
@@ -608,37 +580,31 @@ defmodule Mongo.Session do
     {:keep_state_and_data, {:ok, conn, cmd, client_opts}}
   end
 
-  def handle_call_event(:commit_command, :starting_transaction, _data) do
+  def handle_call_event({:commit_transaction, _start_time}, :starting_transaction, _data) do
     {:next_state, :transaction_committed, :ok}
   end
 
-  def handle_call_event(:commit_command, :transaction_in_progress, %Session{topology: topology, conn: conn, opts: opts} = data) do
-    timeout = opts[:transaction_retry_timeout_s] || @retry_timeout_seconds
-    {:keep_state_and_data, {:run, topology, conn, commit_command(data, write_concern(opts)), commit_command(data, Map.put(write_concern(opts) || %{}, :w, :majority)), timeout}}
+  def handle_call_event({:commit_transaction, start_time}, :transaction_in_progress, data) do
+    case Mongo.Telemetry.span(data.topology, [commitTransaction: 1], [database: "admin"], fn -> run_commit_command(data, start_time) end) do
+      :ok -> {:next_state, :transaction_committed, :ok}
+      error -> {:keep_state_and_data, error}
+    end
   end
 
   ## in other cases we will ignore the commit command
-  def handle_call_event(:commit_command, _state, _data) do
+  def handle_call_event({:commit_transaction, _start_time}, _state, _data) do
     {:keep_state_and_data, :ok}
   end
 
-  def handle_call_event(:transaction_committed, :transaction_in_progress, _data) do
-    {:next_state, :transaction_committed, :ok}
-  end
-
-  def handle_call_event(:transaction_committed, _state, _data) do
-    {:keep_state_and_data, :ok}
-  end
-
-  def handle_call_event(:abort_command, :starting_transaction, _data) do
+  def handle_call_event(:abort_transaction, :starting_transaction, _data) do
     {:next_state, :transaction_aborted, :ok}
   end
 
-  def handle_call_event(:abort_command, :transaction_in_progress, %Session{topology: topology, conn: conn} = data) do
-    {:next_state, :transaction_aborted, {:run, topology, conn, abort_command(data)}}
+  def handle_call_event(:abort_transaction, :transaction_in_progress, data) do
+    {:next_state, :transaction_aborted, Mongo.Telemetry.span(data.topology, [abortTransaction: 1], [database: "admin"], fn -> run_abort_command(data) end)}
   end
 
-  def handle_call_event(:abort_command, _state, _data) do
+  def handle_call_event(:abort_transaction, _state, _data) do
     {:keep_state_and_data, :ok}
   end
 
@@ -684,16 +650,47 @@ defmodule Mongo.Session do
     end
   end
 
-  defp commit_command(%Session{recovery_token: recovery_token, server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts}, write_concern) do
-    filter_nils(
-      commitTransaction: 1,
-      lsid: %{id: id},
-      txnNumber: %BSON.LongNumber{value: txn_num},
-      autocommit: false,
-      writeConcern: write_concern,
-      maxTimeMS: max_time_ms(opts),
-      recoveryToken: recovery_token
-    )
+  ##
+  # Run the commit transaction command.
+  #
+  defp run_commit_command(session, start_time) do
+    run_commit_command(session, start_time, :first)
+  end
+
+  defp run_commit_command(%Session{conn: conn, recovery_token: recovery_token, server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts} = session, time, n) do
+    ##
+    # Drivers should apply a majority write concern when retrying commitTransaction to guard against a transaction being applied twice.
+    write_concern =
+      case n do
+        :first -> write_concern(opts)
+        _ -> Map.put(write_concern(opts) || %{}, :w, :majority)
+      end
+
+    cmd =
+      [
+        commitTransaction: 1,
+        lsid: %{id: id},
+        txnNumber: %BSON.LongNumber{value: txn_num},
+        autocommit: false,
+        writeConcern: write_concern,
+        maxTimeMS: max_time_ms(opts),
+        recoveryToken: recovery_token
+      ]
+      |> filter_nils()
+
+    case Mongo.exec_command(conn, cmd, database: "admin") do
+      {:ok, _doc} ->
+        :ok
+
+      {:error, error} ->
+        timeout = opts[:transaction_retry_timeout_s] || @retry_timeout_seconds
+        try_again = Error.has_label(error, "UnknownTransactionCommitResult") && DateTime.diff(DateTime.utc_now(), time, :second) < timeout
+
+        case try_again do
+          true -> run_commit_command(session, time, :retry)
+          false -> {:error, error}
+        end
+    end
   end
 
   defp max_time_ms(opts) do
@@ -703,14 +700,23 @@ defmodule Mongo.Session do
   defp optional_int64(nil), do: nil
   defp optional_int64(value), do: %BSON.LongNumber{value: value}
 
-  defp abort_command(%Session{server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts}) do
-    filter_nils(
-      abortTransaction: 1,
-      lsid: %{id: id},
-      txnNumber: %BSON.LongNumber{value: txn_num},
-      autocommit: false,
-      writeConcern: write_concern(opts)
-    )
+  ##
+  # Run the abort transaction command.
+  #
+  defp run_abort_command(%Session{conn: conn, server_session: %ServerSession{session_id: id, txn_num: txn_num}, opts: opts}) do
+    cmd =
+      [
+        abortTransaction: 1,
+        lsid: %{id: id},
+        txnNumber: %BSON.LongNumber{value: txn_num},
+        autocommit: false,
+        writeConcern: write_concern(opts)
+      ]
+      |> filter_nils()
+
+    _doc = Mongo.exec_command(conn, cmd, database: "admin")
+
+    :ok
   end
 
   ##

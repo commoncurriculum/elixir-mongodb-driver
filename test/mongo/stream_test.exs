@@ -68,8 +68,8 @@ defmodule Mongo.StreamTest do
     %Mongo.Stream{session: {:own, session}, cursor: cursor_id} = stream = Mongo.find(top, coll, %{}, sort: %{index: 1}, batch_size: 300)
 
     get_more = [getMore: %BSON.LongNumber{value: cursor_id}, collection: coll, batchSize: 300]
-    assert {:ok, %{"cursor" => %{"nextBatch" => %BSON.LazyDocuments{}}}} = Mongo.exec_command_session(top, session, get_more, Keyword.put(stream.opts, :lazy_cursor, true))
-    assert {:ok, %{"cursor" => %{"nextBatch" => [_ | _]}}} = Mongo.exec_command_session(top, session, get_more, stream.opts)
+    assert {:ok, %{"cursor" => %{"nextBatch" => %BSON.LazyDocuments{}}}} = Mongo.exec_command_session(session, get_more, Keyword.put(stream.opts, :lazy_cursor, true))
+    assert {:ok, %{"cursor" => %{"nextBatch" => [_ | _]}}} = Mongo.exec_command_session(session, get_more, stream.opts)
 
     # Every document but the 600 read above.
     assert Enum.map(stream, & &1["index"]) == Enum.to_list(1..300) ++ Enum.to_list(901..1_000)
@@ -113,7 +113,8 @@ defmodule Mongo.StreamTest do
   # A stream whose next batch is the given documents, undecoded, as if a getMore had returned them.
   defp with_lazy_batch(stream, decoder, docs) do
     binary = docs |> Enum.with_index() |> Enum.map(fn {doc, i} -> [0x03, Integer.to_string(i), 0, BSON.Encoder.document(doc)] end) |> IO.iodata_to_binary()
-    %{stream | docs: %BSON.LazyDocuments{binary: binary, decoder: decoder}}
+    get_more = [getMore: %BSON.LongNumber{value: stream.cursor}, collection: stream.coll |> String.split(".") |> List.last()]
+    %{stream | docs: %BSON.LazyDocuments{binary: binary, decoder: decoder}, batch_log: {get_more, 0}}
   end
 
   def forward_execution(_event, %{duration: duration}, %{command: command}, parent), do: send(parent, {:executed, command, duration})
@@ -139,9 +140,12 @@ defmodule Mongo.StreamTest do
     error = assert_raise ArgumentError, fn -> Enum.to_list(stream) end
     assert error.message =~ ~s(got: {:error, %ArgumentError{message: "bad document"}})
     assert catcher |> EventCatcher.succeeded_events() |> Enum.any?(&(&1.command_name == :killCursors))
+
+    # As before, a getMore that fails to decode is not logged.
+    refute_received {:executed, :getMore, _duration}
   end
 
-  test "without command event subscribers, each getMore is logged once", %{pid: top, coll: coll, catcher: catcher, test: test} do
+  test "without command event subscribers, getMores are logged once their batch is decoded", %{pid: top, coll: coll, catcher: catcher, test: test} do
     without_command_subscribers(catcher)
     attach_telemetry(test)
 
@@ -151,27 +155,24 @@ defmodule Mongo.StreamTest do
     refute_received {:executed, :getMore, _duration}
   end
 
-  def forward_database(_event, _measurements, %{command: command, database: database}, parent), do: send(parent, {:database, command, database})
-
-  test "getMores decoded as they are consumed are logged with their database", %{pid: top, coll: coll, catcher: catcher, test: test} do
-    without_command_subscribers(catcher)
-    :telemetry.attach("#{inspect(test)}", [:mongodb_driver, :execution], &__MODULE__.forward_database/4, self())
-    on_exit(fn -> :telemetry.detach("#{inspect(test)}") end)
-
-    assert 1_000 == top |> Mongo.find(coll, %{}, batch_size: 300) |> Enum.count()
-    for _ <- 1..3, do: assert_received({:database, :getMore, "mongodb_test"})
-    refute_received {:database, :getMore, _database}
-  end
-
-  test "a getMore is logged when its reply arrives, not when its batch is decoded", %{pid: top, coll: coll, catcher: catcher, test: test} do
-    without_command_subscribers(catcher)
+  test "the logged duration of a getMore includes decoding its batch", %{pid: top, coll: coll, test: test} do
     attach_telemetry(test)
+    docs = Enum.map(1..10, &%{index: &1})
 
-    assert Enum.to_list(1..15) == top |> Mongo.find(coll, %{}, sort: %{index: 1}, batch_size: 10) |> Stream.map(& &1["index"]) |> Enum.take(15)
-    assert [:find, :getMore, :killCursors] == executed()
+    # With a limit, the cursor is closed after the first batch, which is replaced by a lazy one.
+    assert 10 == top |> Mongo.find(coll, %{}, limit: 10, batch_size: 10) |> with_lazy_batch(SlowDecoder, docs) |> Enum.count()
+    assert_received {:executed, :getMore, duration}
+    assert duration >= 10 * 2_000
 
+    # A getMore whose batch was only partly read is logged when the stream halts.
     docs = Enum.map(1..150, &%{index: &1})
     assert [1] == top |> Mongo.find(coll, %{}, limit: 10, batch_size: 10) |> with_lazy_batch(SlowDecoder, docs) |> Stream.map(& &1["index"]) |> Enum.take(1)
-    assert [:find] == executed()
+    assert_received {:executed, :getMore, duration}
+    assert duration >= 100 * 2_000
+
+    # And before its cursor is killed, if it is still open.
+    _ = executed()
+    assert [1] == top |> Mongo.find(coll, %{}, batch_size: 10) |> with_lazy_batch(SlowDecoder, docs) |> Stream.map(& &1["index"]) |> Enum.take(1)
+    assert [:find, :getMore, :killCursors] == executed()
   end
 end

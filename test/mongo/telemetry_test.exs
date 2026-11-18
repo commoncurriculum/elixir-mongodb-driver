@@ -9,28 +9,6 @@ defmodule Mongo.TelemetryTest do
     [coll: "telemetry_#{:erlang.phash2(test)}"]
   end
 
-  test "the execution event names the database", %{pid: top, coll: coll} do
-    {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
-    assert_receive {:executed, %{command: :insert, collection: ^coll, database: "mongodb_test", error: nil}}
-  end
-
-  test "the execution event of a command that names no collection has none", %{pid: top} do
-    {:ok, _} = Mongo.command(top, ping: 1)
-    assert_receive {:executed, %{command: :ping, collection: nil}}
-  end
-
-  test "the execution event of a getMore names its collection", %{pid: top, coll: coll} do
-    {:ok, _} = Mongo.insert_many(top, coll, [%{n: 1}, %{n: 2}, %{n: 3}])
-    [_, _, _] = top |> Mongo.find(coll, %{}, batch_size: 1) |> Enum.to_list()
-    assert_receive {:executed, %{command: :getMore, collection: ^coll}}
-  end
-
-  test "the execution event carries the error of a command that failed", %{pid: top, coll: coll} do
-    {:error, error} = Mongo.find_one(top, coll, %{"$bad" => 1})
-    assert_receive {:executed, %{command: :find, collection: ^coll, database: "mongodb_test", error: ^error}}
-    assert error.code == 2
-  end
-
   test "only the client pool carries the topology's label, not the monitors' connections" do
     test = self()
     id = make_ref()
@@ -58,9 +36,10 @@ defmodule Mongo.TelemetryTest do
     assert [_client_pool] = labeled |> Enum.map(& &1.pool) |> Enum.uniq()
   end
 
-  test "the execution event carries the write errors of a write that failed", %{pid: top, coll: coll} do
+  test "a write that failed stops with its write errors", %{pid: top, coll: coll} do
+    attach_commands(self())
     {:error, error} = Mongo.update_one(top, coll, %{}, %{"$bad" => %{name: "b"}})
-    assert_receive {:executed, %{command: :update, collection: ^coll, error: ^error}}
+    assert_receive {:command, :stop, _, %{command: :update, collection: ^coll, error: %Mongo.WriteError{write_errors: [%{"code" => 9}]}}}
     assert [%{"code" => 9}] = error.write_errors
   end
 
@@ -156,10 +135,9 @@ defmodule Mongo.TelemetryTest do
     attach_commands(self())
     {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"}, w: 2, wtimeout: 1)
     assert_receive {:command, :stop, _, %{command: :insert, error: %Mongo.Error{}}}
-    assert_receive {:executed, %{command: :insert, error: %Mongo.Error{}}}
   end
 
-  test "a transaction's commit runs in the process that ran the transaction", %{pid: top, coll: coll} do
+  test "a transaction's commit is a command span from the session process", %{pid: top, coll: coll} do
     id = make_ref()
     :telemetry.attach_many(id, [[:mongodb_driver, :command, :start], [:mongodb_driver, :command, :stop]], &__MODULE__.forward_command_with_pid/4, self())
     on_exit(fn -> :telemetry.detach(id) end)
@@ -171,11 +149,12 @@ defmodule Mongo.TelemetryTest do
         :ok
       end)
 
-    assert_receive {:command, :start, _, %{command: :commitTransaction, database: "admin"}, ^test}
-    assert_receive {:command, :stop, _, %{command: :commitTransaction, error: nil}, ^test}
+    assert_receive {:command, :start, _, %{command: :commitTransaction, database: "admin", servers: [_ | _]}, session}
+    assert session != test
+    assert_receive {:command, :stop, _, %{command: :commitTransaction, error: nil}, ^session}
   end
 
-  test "a transaction's abort runs in the process that ran the transaction", %{pid: top, coll: coll} do
+  test "a transaction's abort is a command span from the session process", %{pid: top, coll: coll} do
     id = make_ref()
     :telemetry.attach_many(id, [[:mongodb_driver, :command, :start]], &__MODULE__.forward_command_with_pid/4, self())
     on_exit(fn -> :telemetry.detach(id) end)
@@ -187,6 +166,7 @@ defmodule Mongo.TelemetryTest do
         :error
       end)
 
-    assert_receive {:command, :start, _, %{command: :abortTransaction}, ^test}
+    assert_receive {:command, :start, _, %{command: :abortTransaction}, session}
+    assert session != test
   end
 end
