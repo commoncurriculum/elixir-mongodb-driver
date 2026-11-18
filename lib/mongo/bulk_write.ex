@@ -352,11 +352,15 @@ defmodule Mongo.BulkWrite do
   defp filter_upsert_ids(_), do: []
 
   defp run_commands(session, topology_pid, {cmds, ids}, opts) do
-    {Enum.map(cmds, fn cmd -> Mongo.exec_command_session(topology_pid, session, cmd, opts) end), ids}
+    {Enum.map(cmds, fn cmd -> run_command(topology_pid, session, cmd, opts) end), ids}
   end
 
   defp run_commands(session, topology_pid, cmds, opts) do
-    Enum.map(cmds, fn cmd -> Mongo.exec_command_session(topology_pid, session, cmd, opts) end)
+    Enum.map(cmds, fn cmd -> run_command(topology_pid, session, cmd, opts) end)
+  end
+
+  defp run_command(topology_pid, session, cmd, opts) do
+    Mongo.Telemetry.span(topology_pid, cmd, opts, fn -> Mongo.exec_command_session(session, cmd, opts) end)
   end
 
   defp get_insert_cmds(coll, docs, max_batch_size, opts) do

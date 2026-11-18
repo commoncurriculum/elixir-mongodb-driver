@@ -22,14 +22,14 @@ defmodule Mongo.Telemetry do
     :validate
   ]
 
-  @type attempt :: %{database: String.t() | nil, address: String.t() | nil, error: Exception.t() | nil} | nil
+  @attempt {__MODULE__, :attempt}
 
   @doc """
   Emits `[:mongodb_driver, :command, :start | :stop | :exception]` around one logical operation:
-  every retry and the server selection of each. `fun` returns the operation's result and the
-  last attempt: the database and server it reached and the error it got.
+  every retry and the server selection of each. The stop carries the database and server of the
+  last reply the operation got (see `attempt/2`) and its error. `fun`'s result is returned as is.
   """
-  @spec span(GenServer.server(), BSON.document(), Keyword.t(), (-> {result, attempt})) :: result when result: var
+  @spec span(GenServer.server() | nil, BSON.document(), Keyword.t(), (-> result)) :: result when result: var
   def span(topology, cmd, opts, fun) do
     {command, collection, _params} = parts(cmd)
     %{database: database, servers: servers} = topology(topology)
@@ -43,18 +43,36 @@ defmodule Mongo.Telemetry do
       options: Keyword.get(opts, :telemetry_options, [])
     }
 
-    :telemetry.span([:mongodb_driver, :command], metadata, fn ->
-      {result, attempt} = fun.()
-      {result, Map.merge(metadata, stop(attempt, result))}
-    end)
+    outer = Process.delete(@attempt)
+
+    try do
+      :telemetry.span([:mongodb_driver, :command], metadata, fn ->
+        result = fun.()
+        {result, Map.merge(metadata, stop(Process.get(@attempt), result))}
+      end)
+    after
+      if outer, do: Process.put(@attempt, outer), else: Process.delete(@attempt)
+    end
+  end
+
+  @doc false
+  # Records one attempt's reply, in the process that got it, for the span around it.
+  @spec attempt(map, Exception.t() | nil) :: :ok
+  def attempt(event, error) do
+    Process.put(@attempt, %{database: Map.get(event, :database_name), address: Map.get(event, :address), error: error})
+    :ok
   end
 
   @doc false
   @spec register_topology(String.t() | nil, [String.t()]) :: :ok
   def register_topology(database, servers) do
-    {:ok, _owner} = Registry.register(__MODULE__, self(), %{database: database, servers: servers})
+    _ = Registry.register(__MODULE__, self(), %{database: database, servers: servers})
     :ok
+  rescue
+    ArgumentError -> :ok
   end
+
+  defp topology(nil), do: %{database: nil, servers: []}
 
   defp topology(topology) do
     with pid when is_pid(pid) <- GenServer.whereis(topology),
@@ -65,16 +83,23 @@ defmodule Mongo.Telemetry do
     end
   end
 
-  defp stop(nil, {:error, error}), do: %{address: error_host(error), error: error}
-  defp stop(nil, _result), do: %{address: nil, error: nil}
+  defp stop(attempt, result) do
+    attempt = attempt || %{database: nil, address: nil, error: nil}
 
-  defp stop(%{database: database} = attempt, _result) when is_binary(database),
-    do: attempt
+    {address, error} =
+      case result do
+        {:error, %Mongo.Error{host: host} = error} when is_binary(host) -> {host, error}
+        {:error, error} -> {attempt.address, error}
+        _result -> {attempt.address, attempt.error}
+      end
 
-  defp stop(attempt, _result), do: Map.delete(attempt, :database)
+    stop = %{address: address, error: error}
 
-  defp error_host(%Mongo.Error{host: host}) when is_binary(host), do: host
-  defp error_host(_error), do: nil
+    case attempt.database do
+      database when is_binary(database) -> Map.put(stop, :database, database)
+      _none -> stop
+    end
+  end
 
   @spec parts(BSON.document()) :: {atom, String.t() | nil, Keyword.t()}
   def parts(cmd) do
