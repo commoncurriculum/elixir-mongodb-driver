@@ -73,15 +73,37 @@ defmodule Mongo.TelemetryTest do
     on_exit(fn -> :telemetry.detach(id) end)
   end
 
-  test "a command emits start and stop in the calling process, with its database", %{pid: top, coll: coll} do
+  def forward_command_with_pid(event, measurements, metadata, parent), do: send(parent, {:command, List.last(event), measurements, metadata, self()})
+
+  test "a command emits start and stop in the calling process, with its database and configured servers", %{pid: top, coll: coll} do
     attach_commands(self())
     {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
 
-    assert_receive {:command, :start, %{system_time: _}, %{command: :insert, collection: ^coll, caller: caller, telemetry_span_context: ref}}
-    assert caller == self()
+    assert_receive {:command, :start, %{system_time: _}, %{command: :insert, collection: ^coll, cmd: [{:insert, ^coll} | _], database: "mongodb_test", servers: ["127.0.0.1:27017"], telemetry_span_context: ref}}
     assert_receive {:command, :stop, %{duration: duration}, %{command: :insert, collection: ^coll, database: "mongodb_test", address: address, error: nil, telemetry_span_context: ^ref}}
     assert address =~ ":27017"
     assert duration > 0
+  end
+
+  test "a retried write is one command span, stopped with the attempt that succeeded", %{pid: top, coll: coll} do
+    attach_commands(self())
+
+    {:ok, _} = Mongo.admin_command(top, configureFailPoint: "failCommand", mode: [times: 1], data: [failCommands: ["insert"], errorCode: 91, errorLabels: ["RetryableWriteError"]])
+    {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
+
+    assert_receive {:command, :start, _, %{command: :insert, telemetry_span_context: ref}}
+    assert_receive {:command, :stop, _, %{command: :insert, error: nil, telemetry_span_context: ^ref}}
+    refute_receive {:command, :start, _, %{command: :insert}}
+  end
+
+  test "a command that finds no server stops with the selection error" do
+    attach_commands(self())
+    {:ok, top} = Mongo.start_link(database: "mongodb_test", seeds: ["127.0.0.1:1"], checkout_timeout: 200)
+
+    catch_exit(Mongo.find_one(top, "c", %{}, checkout_timeout: 200))
+
+    assert_receive {:command, :start, _, %{command: :find, database: "mongodb_test", servers: ["127.0.0.1:1"]}}
+    assert_receive {:command, :exception, _, %{command: :find, kind: :exit}}
   end
 
   test "a command names a collection only when it acts on one", %{pid: top, coll: coll} do
@@ -113,15 +135,21 @@ defmodule Mongo.TelemetryTest do
     assert address =~ ":27017"
   end
 
-  test "a getMore stops when its reply arrives, before its batch is consumed", %{pid: top, coll: coll} do
+  test "a lazily decoded getMore stops when its reply arrives, before its batch is consumed", %{pid: top, coll: coll, catcher: catcher} do
+    ref = Process.monitor(catcher)
+    EventCatcher.stop(catcher)
+    assert_receive {:DOWN, ^ref, _, _, _}
+    assert [] == Registry.lookup(:events_registry, :commands)
+
     {:ok, _} = Mongo.insert_many(top, coll, Enum.map(1..300, &%{n: &1}))
     attach_commands(self())
 
     top
     |> Mongo.find(coll, %{}, batch_size: 150)
-    |> Enum.each(fn _doc -> :ok end)
+    |> Stream.take(151)
+    |> Stream.run()
 
-    assert_receive {:command, :stop, _, %{command: :getMore, collection: ^coll, database: "mongodb_test"}}
+    assert_received {:command, :stop, _, %{command: :getMore, collection: ^coll, database: "mongodb_test"}}
   end
 
   test "a write concern error fails the command", %{pid: top, coll: coll} do
@@ -131,8 +159,10 @@ defmodule Mongo.TelemetryTest do
     assert_receive {:executed, %{command: :insert, error: %Mongo.Error{}}}
   end
 
-  test "a transaction's commit names the process that committed it", %{pid: top, coll: coll} do
-    attach_commands(self())
+  test "a transaction's commit runs in the process that ran the transaction", %{pid: top, coll: coll} do
+    id = make_ref()
+    :telemetry.attach_many(id, [[:mongodb_driver, :command, :start], [:mongodb_driver, :command, :stop]], &__MODULE__.forward_command_with_pid/4, self())
+    on_exit(fn -> :telemetry.detach(id) end)
     test = self()
 
     :ok =
@@ -141,7 +171,22 @@ defmodule Mongo.TelemetryTest do
         :ok
       end)
 
-    assert_receive {:command, :start, _, %{command: :commitTransaction, caller: ^test}}
-    assert_receive {:command, :stop, _, %{command: :commitTransaction, error: nil}}
+    assert_receive {:command, :start, _, %{command: :commitTransaction, database: "admin"}, ^test}
+    assert_receive {:command, :stop, _, %{command: :commitTransaction, error: nil}, ^test}
+  end
+
+  test "a transaction's abort runs in the process that ran the transaction", %{pid: top, coll: coll} do
+    id = make_ref()
+    :telemetry.attach_many(id, [[:mongodb_driver, :command, :start]], &__MODULE__.forward_command_with_pid/4, self())
+    on_exit(fn -> :telemetry.detach(id) end)
+    test = self()
+
+    :error =
+      Mongo.transaction(top, fn ->
+        {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
+        :error
+      end)
+
+    assert_receive {:command, :start, _, %{command: :abortTransaction}, ^test}
   end
 end

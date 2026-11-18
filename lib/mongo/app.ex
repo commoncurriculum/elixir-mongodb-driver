@@ -11,7 +11,8 @@ defmodule Mongo.App do
         id: Registry,
         start: {Registry, :start_link, [:duplicate, :events_registry]},
         type: :supervisor
-      }
+      },
+      Supervisor.child_spec({Registry, keys: :unique, name: Mongo.Telemetry}, id: Mongo.Telemetry)
     ]
 
     opts = [strategy: :one_for_one, name: Mongo.Supervisor]

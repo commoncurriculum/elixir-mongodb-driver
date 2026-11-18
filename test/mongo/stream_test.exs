@@ -68,8 +68,8 @@ defmodule Mongo.StreamTest do
     %Mongo.Stream{session: {:own, session}, cursor: cursor_id} = stream = Mongo.find(top, coll, %{}, sort: %{index: 1}, batch_size: 300)
 
     get_more = [getMore: %BSON.LongNumber{value: cursor_id}, collection: coll, batchSize: 300]
-    assert {:ok, %{"cursor" => %{"nextBatch" => %BSON.LazyDocuments{}}}} = Mongo.exec_command_session(session, get_more, Keyword.put(stream.opts, :lazy_cursor, true))
-    assert {:ok, %{"cursor" => %{"nextBatch" => [_ | _]}}} = Mongo.exec_command_session(session, get_more, stream.opts)
+    assert {:ok, %{"cursor" => %{"nextBatch" => %BSON.LazyDocuments{}}}} = Mongo.exec_command_session(top, session, get_more, Keyword.put(stream.opts, :lazy_cursor, true))
+    assert {:ok, %{"cursor" => %{"nextBatch" => [_ | _]}}} = Mongo.exec_command_session(top, session, get_more, stream.opts)
 
     # Every document but the 600 read above.
     assert Enum.map(stream, & &1["index"]) == Enum.to_list(1..300) ++ Enum.to_list(901..1_000)

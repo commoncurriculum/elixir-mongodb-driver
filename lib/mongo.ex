@@ -1592,69 +1592,69 @@ defmodule Mongo do
   @doc """
   This function is very fundamental.
   """
-  def issue_command(topology_pid, cmd, :read, opts) do
+  def issue_command(topology_pid, cmd, type, opts) do
+    Mongo.Telemetry.span(topology_pid, cmd, opts, fn -> retry_command(topology_pid, cmd, type, opts) end)
+  end
+
+  defp retry_command(topology_pid, cmd, :read, opts) do
     ## check, if retryable reads are enabled
     opts = Mongo.retryable_reads(opts)
 
-    case in_read_session(topology_pid, &exec_command_session(&1, cmd, &2), opts) do
-      {:ok, doc} ->
-        {:ok, doc}
-
-      {:error, error} ->
+    case in_read_session(topology_pid, &run_command_session(&1, cmd, &2), opts) |> with_attempt() do
+      {{:error, error}, attempt} ->
         cond do
           Error.not_writable_primary_or_recovering?(error, opts) ->
             ## in case of explicitly
-            issue_command(topology_pid, cmd, :read, Keyword.put(opts, :retry_counter, 2))
+            retry_command(topology_pid, cmd, :read, Keyword.put(opts, :retry_counter, 2))
 
           Error.should_retry_read(error, cmd, opts) ->
-            issue_command(topology_pid, cmd, :read, Keyword.put(opts, :read_counter, 2))
+            retry_command(topology_pid, cmd, :read, Keyword.put(opts, :read_counter, 2))
 
           true ->
-            {:error, error}
+            {{:error, error}, attempt}
         end
+
+      {{:ok, {_flags, doc}}, attempt} ->
+        {{:ok, doc}, attempt}
     end
   end
 
-  def issue_command(topology_pid, cmd, :write, opts) do
+  defp retry_command(topology_pid, cmd, :write, opts) do
     ## check, if retryable reads are enabled
     opts =
       opts
       |> Keyword.delete(:read_preferences)
       |> Mongo.retryable_writes(acknowledged?(cmd[:writeConcerns]))
 
-    case in_write_session(topology_pid, &exec_command_session(&1, cmd, &2), opts) do
-      {:ok, doc} ->
-        {:ok, doc}
-
-      {:error, error} ->
+    case in_write_session(topology_pid, &run_command_session(&1, cmd, &2), opts) |> with_attempt() do
+      {{:error, error}, attempt} ->
         cond do
           Error.not_writable_primary_or_recovering?(error, opts) ->
             ## in case of explicitly
-            issue_command(topology_pid, cmd, :read, Keyword.put(opts, :retry_counter, 2))
+            retry_command(topology_pid, cmd, :read, Keyword.put(opts, :retry_counter, 2))
 
           Error.should_retry_write(error, cmd, opts) ->
-            issue_command(topology_pid, cmd, :write, Keyword.put(opts, :write_counter, 2))
+            retry_command(topology_pid, cmd, :write, Keyword.put(opts, :write_counter, 2))
 
           true ->
-            {:error, error}
+            {{:error, error}, attempt}
         end
+
+      {{:ok, {_flags, doc}}, attempt} ->
+        {{:ok, doc}, attempt}
     end
   end
 
+  # A session that could not be started, or a fun that raised, returns a bare error.
+  defp with_attempt({:error, _error} = error), do: {error, nil}
+  defp with_attempt({_result, _attempt} = result), do: result
+
   @doc false
-  @spec exec_command_session(GenServer.server(), BSON.document(), Keyword.t()) ::
+  # One logical operation in a session the caller already holds, such as a cursor's getMore.
+  @spec exec_command_session(GenServer.server(), GenServer.server(), BSON.document(), Keyword.t()) ::
           {:ok, BSON.document() | nil} | {:error, Mongo.Error.t()}
-  def exec_command_session(session, cmd, opts) do
-    result =
-      Mongo.Telemetry.span(cmd, opts, fn ->
-        with {:ok, conn, new_cmd, opts} <- Session.bind_session(session, cmd, opts),
-             {:ok, _cmd, response} <- execute(conn, %Query{action: {:command, new_cmd}}, opts),
-             :ok <- Session.update_session(session, response, opts) do
-          {check_for_error(response, cmd, opts), response}
-        else
-          error -> {error, nil}
-        end
-      end)
+  def exec_command_session(topology_pid, session, cmd, opts) do
+    result = Mongo.Telemetry.span(topology_pid, cmd, opts, fn -> run_command_session(session, cmd, opts) end)
 
     with {:ok, {_flags, doc}} <- result do
       {:ok, doc}
@@ -1664,21 +1664,31 @@ defmodule Mongo do
   @doc false
   # Used by Mongo.Stream. Runs a getMore and returns its batch undecoded (BSON.LazyDocuments)
   # unless someone is subscribed to command events.
-  @spec exec_get_more(GenServer.server(), BSON.document(), Keyword.t()) :: {:ok, BSON.document()} | {:error, Mongo.Error.t()}
-  def exec_get_more(session, cmd, opts) do
-    exec_command_session(session, cmd, Keyword.put(opts, :lazy_cursor, true))
+  @spec exec_get_more(GenServer.server(), GenServer.server(), BSON.document(), Keyword.t()) :: {:ok, BSON.document()} | {:error, Mongo.Error.t()}
+  def exec_get_more(topology_pid, session, cmd, opts) do
+    exec_command_session(topology_pid, session, cmd, Keyword.put(opts, :lazy_cursor, true))
   end
 
   @doc false
-  @spec exec_command(GenServer.server(), BSON.document(), Keyword.t()) ::
-          {:ok, {any(), BSON.document()} | nil} | {:error, Mongo.Error.t()}
-  def exec_command(conn, cmd, opts) do
-    Mongo.Telemetry.span(cmd, opts, fn ->
-      case execute(conn, %Query{action: {:command, cmd}}, opts) do
-        {:ok, _cmd, response} -> {check_for_error(response, cmd, opts), response}
-        error -> {error, nil}
-      end
-    end)
+  # One attempt, with no telemetry span: returns its result and what the attempt reached.
+  @spec run_command_session(GenServer.server(), BSON.document(), Keyword.t()) :: {{:ok, {any(), BSON.document()}} | {:error, any()}, Mongo.Telemetry.attempt()}
+  def run_command_session(session, cmd, opts) do
+    with {:ok, conn, new_cmd, opts} <- Session.bind_session(session, cmd, opts),
+         {:ok, _cmd, response} <- execute(conn, %Query{action: {:command, new_cmd}}, opts),
+         :ok <- Session.update_session(session, response, opts) do
+      checked_reply(response, cmd, opts)
+    else
+      error -> {error, nil}
+    end
+  end
+
+  @doc false
+  @spec run_command(GenServer.server(), BSON.document(), Keyword.t()) :: {{:ok, {any(), BSON.document()}} | {:error, any()}, Mongo.Telemetry.attempt()}
+  def run_command(conn, cmd, opts) do
+    case execute(conn, %Query{action: {:command, cmd}}, opts) do
+      {:ok, _cmd, response} -> checked_reply(response, cmd, opts)
+      error -> {error, nil}
+    end
   end
 
   # Cursor batches arrive undecoded (BSON.LazyDocuments, see Mongo.Messages) and are decoded
@@ -1814,78 +1824,41 @@ defmodule Mongo do
     <<u0::48, @uuid_v4::4, u1::12, @variant10::2, u2::62>>
   end
 
+  defp check_for_error(response, cmd, opts) do
+    {result, _attempt} = checked_reply(response, cmd, opts)
+    result
+  end
+
   ##
-  # Checks for an error and broadcast the event.
+  # Checks the reply for an error, broadcasts the event and logs it. Returns the result and what
+  # the attempt reached, for the command's telemetry span.
   ##
-  defp check_for_error({%{"ok" => ok} = response, %{request_id: request_id, operation_id: operation_id, connection_id: connection_id} = event, flags, duration}, cmd, opts) when ok == 1 do
-    Events.notify(
-      %CommandSucceededEvent{
-        reply: response,
-        duration: duration,
-        command_name: event.command_name,
-        request_id: request_id,
-        operation_id: operation_id,
-        connection_id: connection_id
-      },
-      :commands
-    )
+  defp checked_reply({doc, event, flags, duration}, cmd, opts) do
+    {result, error} =
+      case doc do
+        %{"ok" => ok} when ok == 1 ->
+          {{:ok, {flags, doc}}, Mongo.Telemetry.reply_error(doc)}
 
-    log_success(response, cmd, duration, opts, %{database: Map.get(event, :database_name)})
+        _failed ->
+          error = Mongo.Error.exception(doc)
+          {{:error, error}, error}
+      end
 
-    {:ok, {flags, response}}
+    notify_command(result, doc, event, duration)
+    database = Map.get(event, :database_name)
+    do_log(cmd, duration, opts, %{database: database, error: error})
+    {result, %{database: database, address: Map.get(event, :address), error: error}}
   end
 
-  defp check_for_error({%{"ok" => ok} = response, event, flags, duration}, cmd, opts) when ok == 1 do
-    Events.notify(
-      %CommandSucceededEvent{
-        reply: response,
-        duration: duration,
-        command_name: event.command_name
-      },
-      :commands
-    )
-
-    log_success(response, cmd, duration, opts, %{database: Map.get(event, :database_name)})
-
-    {:ok, {flags, response}}
+  defp notify_command({:ok, _reply}, doc, event, duration) do
+    Events.notify(struct(CommandSucceededEvent, [reply: doc, duration: duration, command_name: event.command_name] ++ event_ids(event)), :commands)
   end
 
-  defp check_for_error({doc, %{request_id: request_id, operation_id: operation_id, connection_id: connection_id} = event, _flags, duration}, cmd, opts) do
-    error = Mongo.Error.exception(doc)
-
-    Events.notify(
-      %CommandFailedEvent{
-        failure: error,
-        duration: duration,
-        command_name: event.command_name,
-        request_id: request_id,
-        operation_id: operation_id,
-        connection_id: connection_id
-      },
-      :commands
-    )
-
-    do_log(cmd, duration, opts, %{database: Map.get(event, :database_name), error: error})
-
-    {:error, error}
+  defp notify_command({:error, error}, _doc, event, duration) do
+    Events.notify(struct(CommandFailedEvent, [failure: error, duration: duration, command_name: event.command_name] ++ event_ids(event)), :commands)
   end
 
-  defp check_for_error({doc, event, _flags, duration}, cmd, opts) do
-    error = Mongo.Error.exception(doc)
-
-    Events.notify(
-      %CommandFailedEvent{
-        failure: error,
-        duration: duration,
-        command_name: event.command_name
-      },
-      :commands
-    )
-
-    do_log(cmd, duration, opts, %{database: Map.get(event, :database_name), error: error})
-
-    {:error, error}
-  end
+  defp event_ids(event), do: event |> Map.take([:request_id, :operation_id, :connection_id]) |> Map.to_list()
 
   defp get_stream(topology_pid, cmd, opts) do
     Mongo.Stream.new(topology_pid, cmd, opts)
@@ -1928,9 +1901,6 @@ defmodule Mongo do
 
   defp assert_many_docs!(other),
     do: raise(ArgumentError, "expected list of documents, got: #{inspect(other)}")
-
-  defp log_success(response, cmd, duration, opts, extra),
-    do: do_log(cmd, duration, opts, Map.put(extra, :error, Mongo.Telemetry.reply_error(response)))
 
   ## support for logging like Ecto
   defp do_log(:more_to_come, _duration, _opts, _extra) do
