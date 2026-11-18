@@ -500,18 +500,20 @@ defmodule Mongo.Session do
     nil
   end
 
-  defp handle_call_event({:commit_transaction, start_time}, :transaction_in_progress, data, caller) do
+  defp handle_call_event({:commit_transaction, start_time}, :transaction_in_progress, data, caller), do: commit_transaction(data, start_time, caller)
+  defp handle_call_event(:abort_transaction, :transaction_in_progress, data, caller), do: abort_transaction(data, caller)
+  defp handle_call_event(cmd, state, data, _caller), do: handle_call_event(cmd, state, data)
+
+  defp commit_transaction(data, start_time, caller) do
     case Mongo.Telemetry.span(data.topology, [commitTransaction: 1], [database: "admin", telemetry_caller: caller], fn -> run_commit_command(data, start_time) end) do
       :ok -> {:next_state, :transaction_committed, :ok}
       error -> {:keep_state_and_data, error}
     end
   end
 
-  defp handle_call_event(:abort_transaction, :transaction_in_progress, data, caller) do
+  defp abort_transaction(data, caller) do
     {:next_state, :transaction_aborted, Mongo.Telemetry.span(data.topology, [abortTransaction: 1], [database: "admin", telemetry_caller: caller], fn -> run_abort_command(data) end)}
   end
-
-  defp handle_call_event(cmd, state, data, _caller), do: handle_call_event(cmd, state, data)
 
   def handle_call_event(:start_transaction, transaction, %Session{server_session: session} = data) when transaction in [:no_transaction, :transaction_aborted, :transaction_committed] do
     {:next_state, :starting_transaction, %Session{data | recovery_token: nil, server_session: ServerSession.next_txn_num(session)}, :ok}
@@ -597,8 +599,8 @@ defmodule Mongo.Session do
     {:next_state, :transaction_committed, :ok}
   end
 
-  def handle_call_event({:commit_transaction, _start_time} = cmd, :transaction_in_progress, data) do
-    handle_call_event(cmd, :transaction_in_progress, data, self())
+  def handle_call_event({:commit_transaction, start_time}, :transaction_in_progress, data) do
+    commit_transaction(data, start_time, self())
   end
 
   ## in other cases we will ignore the commit command
@@ -611,7 +613,7 @@ defmodule Mongo.Session do
   end
 
   def handle_call_event(:abort_transaction, :transaction_in_progress, data) do
-    handle_call_event(:abort_transaction, :transaction_in_progress, data, self())
+    abort_transaction(data, self())
   end
 
   def handle_call_event(:abort_transaction, _state, _data) do
