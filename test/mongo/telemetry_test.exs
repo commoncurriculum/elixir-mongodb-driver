@@ -58,7 +58,8 @@ defmodule Mongo.TelemetryTest do
     attach_commands(self())
     {:ok, _} = Mongo.insert_one(top, coll, %{name: "a"})
 
-    assert_receive {:command, :start, %{system_time: _}, %{command: :insert, collection: ^coll, cmd: [{:insert, ^coll} | _], database: "mongodb_test", servers: ["127.0.0.1:27017"], telemetry_span_context: ref}}
+    assert_receive {:command, :start, %{system_time: _}, %{command: :insert, collection: ^coll, cmd: [{:insert, ^coll} | _], database: "mongodb_test", servers: ["127.0.0.1:27017"], caller: caller, telemetry_span_context: ref}}
+    assert caller == self()
     assert_receive {:command, :stop, %{duration: duration}, %{command: :insert, collection: ^coll, database: "mongodb_test", address: address, error: nil, telemetry_span_context: ^ref}}
     assert address =~ ":27017"
     assert duration > 0
@@ -137,7 +138,7 @@ defmodule Mongo.TelemetryTest do
     assert_receive {:command, :stop, _, %{command: :insert, error: %Mongo.Error{}}}
   end
 
-  test "a transaction's commit is a command span from the session process", %{pid: top, coll: coll} do
+  test "a transaction's commit is a command span from the session process, for its caller", %{pid: top, coll: coll} do
     id = make_ref()
     :telemetry.attach_many(id, [[:mongodb_driver, :command, :start], [:mongodb_driver, :command, :stop]], &__MODULE__.forward_command_with_pid/4, self())
     on_exit(fn -> :telemetry.detach(id) end)
@@ -149,12 +150,12 @@ defmodule Mongo.TelemetryTest do
         :ok
       end)
 
-    assert_receive {:command, :start, _, %{command: :commitTransaction, database: "admin", servers: [_ | _]}, session}
+    assert_receive {:command, :start, _, %{command: :commitTransaction, database: "admin", servers: [_ | _], caller: ^test}, session}
     assert session != test
     assert_receive {:command, :stop, _, %{command: :commitTransaction, error: nil}, ^session}
   end
 
-  test "a transaction's abort is a command span from the session process", %{pid: top, coll: coll} do
+  test "a transaction's abort is a command span from the session process, for its caller", %{pid: top, coll: coll} do
     id = make_ref()
     :telemetry.attach_many(id, [[:mongodb_driver, :command, :start]], &__MODULE__.forward_command_with_pid/4, self())
     on_exit(fn -> :telemetry.detach(id) end)
@@ -166,7 +167,7 @@ defmodule Mongo.TelemetryTest do
         :error
       end)
 
-    assert_receive {:command, :start, _, %{command: :abortTransaction}, session}
+    assert_receive {:command, :start, _, %{command: :abortTransaction, caller: ^test}, session}
     assert session != test
   end
 end

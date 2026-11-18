@@ -28,6 +28,8 @@ defmodule Mongo.Telemetry do
   Emits `[:mongodb_driver, :command, :start | :stop | :exception]` around one logical operation:
   every retry and the server selection of each. The stop carries the database and server of the
   last reply the operation got (see `attempt/2`) and its error. `fun`'s result is returned as is.
+  `:caller` is the process the operation runs for: the session's caller for commit and abort,
+  which run in the session process, and the emitting process otherwise.
   """
   @spec span(GenServer.server() | nil, BSON.document(), Keyword.t(), (-> result)) :: result when result: var
   def span(topology, cmd, opts, fun) do
@@ -40,7 +42,8 @@ defmodule Mongo.Telemetry do
       cmd: cmd,
       database: opts[:database] || database,
       servers: servers,
-      options: Keyword.get(opts, :telemetry_options, [])
+      options: Keyword.get(opts, :telemetry_options, []),
+      caller: Keyword.get(opts, :telemetry_caller, self())
     }
 
     outer = Process.delete(@attempt)
