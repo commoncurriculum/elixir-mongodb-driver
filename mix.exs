@@ -32,7 +32,7 @@ defmodule Mongodb.Mixfile do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
-      {:db_connection, github: "commoncurriculum/db_connection", ref: "d7375cf9cba97a7222bcf8bd70dced526ca4c590"},
+      {:db_connection, github: "commoncurriculum/db_connection", ref: "dd773e37044a0c811b821f522f8b317f1fa5f3c6"},
       {:decimal, "~> 2.1 and >= 2.1.1 or ~> 3.0"},
       {:patch, "~> 0.12.0", only: [:dev, :test]},
       {:jason, "~> 1.3", only: [:dev, :test]},
