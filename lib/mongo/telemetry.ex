@@ -33,7 +33,7 @@ defmodule Mongo.Telemetry do
   """
   @spec span(GenServer.server() | nil, BSON.document(), Keyword.t(), (-> result)) :: result when result: var
   def span(topology, cmd, opts, fun) do
-    {command, collection, _params} = parts(cmd)
+    {command, collection} = parts(cmd)
     %{database: database, servers: servers} = topology(topology)
 
     metadata = %{
@@ -84,6 +84,8 @@ defmodule Mongo.Telemetry do
     else
       _ -> %{database: nil, servers: []}
     end
+  rescue
+    _error -> %{database: nil, servers: []}
   end
 
   defp stop(attempt, result) do
@@ -104,26 +106,16 @@ defmodule Mongo.Telemetry do
     end
   end
 
-  @spec parts(BSON.document()) :: {atom, String.t() | nil, Keyword.t()}
-  def parts(cmd) do
-    [{command, value} | _] = cmd
-    {_, params} = Keyword.pop_first(cmd, command)
-
+  defp parts([{command, value} | params]) do
     case command do
-      :getMore ->
-        {collection, params} = Keyword.pop_first(params, :collection)
-        {command, collection, params}
-
-      :renameCollection when is_binary(value) ->
-        {command, value |> String.split(".", parts: 2) |> List.last(), params}
-
-      command when command in @collection_commands and is_binary(value) ->
-        {command, value, params}
-
-      command ->
-        {command, nil, params}
+      :getMore -> {command, :proplists.get_value(:collection, params, nil)}
+      :renameCollection when is_binary(value) -> {command, value |> String.split(".", parts: 2) |> List.last()}
+      command when command in @collection_commands and is_binary(value) -> {command, value}
+      command -> {command, nil}
     end
   end
+
+  defp parts(_cmd), do: {nil, nil}
 
   @spec reply_error(map) :: Mongo.WriteError.t() | Mongo.Error.t() | nil
   def reply_error(%{"writeErrors" => write_errors} = doc), do: %Mongo.WriteError{n: doc["n"], ok: doc["ok"], write_errors: write_errors}

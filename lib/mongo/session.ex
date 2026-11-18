@@ -597,6 +597,10 @@ defmodule Mongo.Session do
     {:next_state, :transaction_committed, :ok}
   end
 
+  def handle_call_event({:commit_transaction, _start_time} = cmd, :transaction_in_progress, data) do
+    handle_call_event(cmd, :transaction_in_progress, data, self())
+  end
+
   ## in other cases we will ignore the commit command
   def handle_call_event({:commit_transaction, _start_time}, _state, _data) do
     {:keep_state_and_data, :ok}
@@ -604,6 +608,10 @@ defmodule Mongo.Session do
 
   def handle_call_event(:abort_transaction, :starting_transaction, _data) do
     {:next_state, :transaction_aborted, :ok}
+  end
+
+  def handle_call_event(:abort_transaction, :transaction_in_progress, data) do
+    handle_call_event(:abort_transaction, :transaction_in_progress, data, self())
   end
 
   def handle_call_event(:abort_transaction, _state, _data) do
